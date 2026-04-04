@@ -1,575 +1,612 @@
 /*
-	Copyright 2018 Benjamin Vedder	benjamin@vedder.se
+Copyright 2018 Benjamin Vedder	benjamin@vedder.se
 
-	This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-    */
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 
-	#include "hw.h"
+#include "hw.h"
 
-	#include "ch.h"
-	#include "hal.h"
-	#include "stm32f4xx_conf.h"
-	#include "utils.h"
-	#include "utils_math.h"
-	#include "terminal.h"
-	#include "commands.h"
-	#include "mc_interface.h"
-	#include "stdio.h"
-	#include "timeout.h"
-	#include "mcpwm.h"
-	#include "mcpwm_foc.h"
-	//#include "gpdrive.h"
-	#include "app.h"
-	#include "mempools.h"
-	#include "pwm_servo.h"
-	#include "servo_dec.h"
+#include "ch.h"
+#include "hal.h"
+#include "stm32f4xx_conf.h"
+#include "utils.h"
+#include "utils_math.h"
+#include "terminal.h"
+#include "commands.h"
+#include "mc_interface.h"
+#include "stdio.h"
+#include "timeout.h"
+#include "mcpwm.h"
+#include "mcpwm_foc.h"
+#include "mc_interface.h"
+//#include "gpdrive.h"
+#include "app.h"
+#include "mempools.h"
+#include "pwm_servo.h"
+#include "servo_dec.h"
+
+// Variables
+static volatile bool i2c_running = false;
+static mutex_t shutdown_mutex;
+static float bt_diff = 0.0;
+static systime_t turned_on_at;
+
+//private functions
+static void terminal_cmd_doublepulse(int argc, const char **argv);
+
+// I2C configuration
+static const I2CConfig i2cfg = {
+		OPMODE_I2C,
+		100000,
+		STD_DUTY_CYCLE
+};
+
+static void terminal_shutdown_now(int argc, const char **argv);
+static void terminal_button_test(int argc, const char **argv);
+static void terminal_cmd_beep(int argc, const char **argv);
+
+static void buzzer_on(void);
+static void buzzer_off(void);
+
+// static void hw_early_init_end(void) {
+// 	// wait for the button to be held for at least HW_STARTUP_HOLD_TIME_MS
+// 	do() {
+// 		chThdSleepMilliseconds(10);
+// 		float time_elapsed_after_turned_on = chVTTimeElapsedSinceX(turned_on_at) / (float)CH_CFG_ST_FREQUENCY;
+// 	} while(time_elapsed_after_turned_on < HW_STARTUP_HOLD_TIME_MS);
+
+// 	// turn the power on
+// 	HW_SHUTDOWN_HOLD_ON();
+// 	buzzer_on();
+// 	chThdSleepMilliseconds(HW_STARTUP_BUZZER_TIME_MS);
+// 	buzzer_off();
+// }
+
+void hw_early_init_begin(void) {
+	palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_OUTPUT_PUSHPULL);
+	turned_on_at = chVTGetSystemTimeX();
 	
-	// Variables
-	static volatile bool i2c_running = false;
-	static mutex_t shutdown_mutex;
-	static float bt_diff = 0.0;
-	
-	//private functions
-	static void terminal_cmd_doublepulse(int argc, const char **argv);
-	
-	// I2C configuration
-	static const I2CConfig i2cfg = {
-			OPMODE_I2C,
-			100000,
-			STD_DUTY_CYCLE
-	};
-	
-	static void terminal_shutdown_now(int argc, const char **argv);
-	static void terminal_button_test(int argc, const char **argv);
-	static void terminal_cmd_beep(int argc, const char **argv);
-	static void terminal_cmd_beep_pwm(int argc, const char **argv);
-	
-	
-	void hw_init_gpio(void) {
-	
-		chMtxObjectInit(&shutdown_mutex);
-	
-		// GPIO clock enable
-		RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
-		RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
-		RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
-		RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOD, ENABLE);
-	
-		// LEDs
-		palSetPadMode(LED_GREEN_GPIO, LED_GREEN_PIN,
-				PAL_MODE_OUTPUT_PUSHPULL |
-				PAL_STM32_OSPEED_HIGHEST);
-		palSetPadMode(LED_RED_GPIO, LED_RED_PIN,
-				PAL_MODE_OUTPUT_PUSHPULL |
-				PAL_STM32_OSPEED_HIGHEST);
-	
-		// GPIOA Configuration: Channel 1 to 3 as alternate function push-pull
-		palSetPadMode(GPIOA, 8, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
-				PAL_STM32_OSPEED_HIGHEST |
-				PAL_STM32_PUDR_FLOATING);
-		palSetPadMode(GPIOA, 9, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
-				PAL_STM32_OSPEED_HIGHEST |
-				PAL_STM32_PUDR_FLOATING);
-		palSetPadMode(GPIOA, 10, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
-				PAL_STM32_OSPEED_HIGHEST |
-				PAL_STM32_PUDR_FLOATING);
-	
-		palSetPadMode(GPIOB, 13, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
-				PAL_STM32_OSPEED_HIGHEST |
-				PAL_STM32_PUDR_FLOATING);
-		palSetPadMode(GPIOB, 14, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
-				PAL_STM32_OSPEED_HIGHEST |
-				PAL_STM32_PUDR_FLOATING);
-		palSetPadMode(GPIOB, 15, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
-				PAL_STM32_OSPEED_HIGHEST |
-				PAL_STM32_PUDR_FLOATING);
-	
-		// Hall sensors
-		palSetPadMode(HW_HALL_ENC_GPIO1, HW_HALL_ENC_PIN1, PAL_MODE_INPUT_PULLUP);
-		palSetPadMode(HW_HALL_ENC_GPIO2, HW_HALL_ENC_PIN2, PAL_MODE_INPUT_PULLUP);
-		palSetPadMode(HW_HALL_ENC_GPIO3, HW_HALL_ENC_PIN3, PAL_MODE_INPUT_PULLUP);
-	
-		// Phase filters
-		palSetPadMode(PHASE_FILTER_GPIO, PHASE_FILTER_PIN,
-				PAL_MODE_OUTPUT_PUSHPULL |
-				PAL_STM32_OSPEED_HIGHEST);
-		PHASE_FILTER_OFF();
-	
-			// Current filter
-		palSetPadMode(GPIOD, 2,
-				PAL_MODE_OUTPUT_PUSHPULL |
-				PAL_STM32_OSPEED_HIGHEST);
-	
-		CURRENT_FILTER_OFF();
-	/*
-		// AUX pin
-		AUX_OFF();
-		palSetPadMode(AUX_GPIO, AUX_PIN,
-				PAL_MODE_OUTPUT_PUSHPULL |
-				PAL_STM32_OSPEED_HIGHEST);
-		*/
-		// ADC Pins
-		palSetPadMode(GPIOA, 0, PAL_MODE_INPUT_ANALOG);
-		palSetPadMode(GPIOA, 1, PAL_MODE_INPUT_ANALOG);
-		palSetPadMode(GPIOA, 2, PAL_MODE_INPUT_ANALOG);
-		palSetPadMode(GPIOA, 3, PAL_MODE_INPUT_ANALOG);
-		palSetPadMode(GPIOA, 5, PAL_MODE_INPUT_ANALOG);
-		palSetPadMode(GPIOA, 6, PAL_MODE_INPUT_ANALOG);
-	
-		palSetPadMode(GPIOB, 0, PAL_MODE_INPUT_ANALOG);
-		palSetPadMode(GPIOB, 1, PAL_MODE_INPUT_ANALOG);
-	
-		palSetPadMode(GPIOC, 0, PAL_MODE_INPUT_ANALOG);
-		palSetPadMode(GPIOC, 1, PAL_MODE_INPUT_ANALOG);
-		palSetPadMode(GPIOC, 2, PAL_MODE_INPUT_ANALOG);
-		palSetPadMode(GPIOC, 3, PAL_MODE_INPUT_ANALOG);
-		palSetPadMode(GPIOC, 4, PAL_MODE_INPUT_ANALOG);
-		//palSetPadMode(GPIOC, 5, PAL_MODE_INPUT_ANALOG);
-	
-		terminal_register_command_callback(
-			"shutdown",
-			"Shutdown VESC now.",
-			0,
-			terminal_shutdown_now);
-	
-		terminal_register_command_callback(
-			"test_button",
-			"Try sampling the shutdown button",
-			0,
-			terminal_button_test);
-			
-		terminal_register_command_callback(
-			"double_pulse",
-			"Double pulse test",
-			0,
-			terminal_cmd_doublepulse);
-	
-		terminal_register_command_callback(
-			"beep",
-			"Drive servo pin high for n seconds (GPIO).",
-			"[seconds]",
-			terminal_cmd_beep);
-	
-		terminal_register_command_callback(
-			"beep_pwm",
-			"PWM on servo pin for n seconds at freq Hz.",
-			"[seconds] [freq_hz]",
-			terminal_cmd_beep_pwm);
+	// TODO: implement and switch to this
+	// chThdCreateStatic(hw_early_init_end);
+
+	HW_SHUTDOWN_HOLD_ON();
+	buzzer_on();
+	chThdSleepMilliseconds(HW_STARTUP_BUZZER_TIME_MS);
+	buzzer_off();
+}
+
+void hw_init_gpio(void) {
+
+	chMtxObjectInit(&shutdown_mutex);
+
+	// GPIO clock enable
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOD, ENABLE);
+
+	// LEDs
+	palSetPadMode(LED_GREEN_GPIO, LED_GREEN_PIN,
+			PAL_MODE_OUTPUT_PUSHPULL |
+			PAL_STM32_OSPEED_HIGHEST);
+	palSetPadMode(LED_RED_GPIO, LED_RED_PIN,
+			PAL_MODE_OUTPUT_PUSHPULL |
+			PAL_STM32_OSPEED_HIGHEST);
+
+	// GPIOA Configuration: Channel 1 to 3 as alternate function push-pull
+	palSetPadMode(GPIOA, 8, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
+			PAL_STM32_OSPEED_HIGHEST |
+			PAL_STM32_PUDR_FLOATING);
+	palSetPadMode(GPIOA, 9, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
+			PAL_STM32_OSPEED_HIGHEST |
+			PAL_STM32_PUDR_FLOATING);
+	palSetPadMode(GPIOA, 10, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
+			PAL_STM32_OSPEED_HIGHEST |
+			PAL_STM32_PUDR_FLOATING);
+
+	palSetPadMode(GPIOB, 13, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
+			PAL_STM32_OSPEED_HIGHEST |
+			PAL_STM32_PUDR_FLOATING);
+	palSetPadMode(GPIOB, 14, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
+			PAL_STM32_OSPEED_HIGHEST |
+			PAL_STM32_PUDR_FLOATING);
+	palSetPadMode(GPIOB, 15, PAL_MODE_ALTERNATE(GPIO_AF_TIM1) |
+			PAL_STM32_OSPEED_HIGHEST |
+			PAL_STM32_PUDR_FLOATING);
+
+	// Hall sensors
+	palSetPadMode(HW_HALL_ENC_GPIO1, HW_HALL_ENC_PIN1, PAL_MODE_INPUT_PULLUP);
+	palSetPadMode(HW_HALL_ENC_GPIO2, HW_HALL_ENC_PIN2, PAL_MODE_INPUT_PULLUP);
+	palSetPadMode(HW_HALL_ENC_GPIO3, HW_HALL_ENC_PIN3, PAL_MODE_INPUT_PULLUP);
+
+	// Phase filters
+	palSetPadMode(PHASE_FILTER_GPIO, PHASE_FILTER_PIN,
+			PAL_MODE_OUTPUT_PUSHPULL |
+			PAL_STM32_OSPEED_HIGHEST);
+	PHASE_FILTER_OFF();
+
+		// Current filter
+	palSetPadMode(GPIOD, 2,
+			PAL_MODE_OUTPUT_PUSHPULL |
+			PAL_STM32_OSPEED_HIGHEST);
+
+	CURRENT_FILTER_OFF();
+/*
+	// AUX pin
+	AUX_OFF();
+	palSetPadMode(AUX_GPIO, AUX_PIN,
+			PAL_MODE_OUTPUT_PUSHPULL |
+			PAL_STM32_OSPEED_HIGHEST);
+	*/
+	// ADC Pins
+	palSetPadMode(GPIOA, 0, PAL_MODE_INPUT_ANALOG);
+	palSetPadMode(GPIOA, 1, PAL_MODE_INPUT_ANALOG);
+	palSetPadMode(GPIOA, 2, PAL_MODE_INPUT_ANALOG);
+	palSetPadMode(GPIOA, 3, PAL_MODE_INPUT_ANALOG);
+	palSetPadMode(GPIOA, 5, PAL_MODE_INPUT_ANALOG);
+	palSetPadMode(GPIOA, 6, PAL_MODE_INPUT_ANALOG);
+
+	palSetPadMode(GPIOB, 0, PAL_MODE_INPUT_ANALOG);
+	palSetPadMode(GPIOB, 1, PAL_MODE_INPUT_ANALOG);
+
+	palSetPadMode(GPIOC, 0, PAL_MODE_INPUT_ANALOG);
+	palSetPadMode(GPIOC, 1, PAL_MODE_INPUT_ANALOG);
+	palSetPadMode(GPIOC, 2, PAL_MODE_INPUT_ANALOG);
+	palSetPadMode(GPIOC, 3, PAL_MODE_INPUT_ANALOG);
+	palSetPadMode(GPIOC, 4, PAL_MODE_INPUT_ANALOG);
+	//palSetPadMode(GPIOC, 5, PAL_MODE_INPUT_ANALOG);
+
+	terminal_register_command_callback(
+		"shutdown",
+		"Shutdown VESC now.",
+		0,
+		terminal_shutdown_now);
+
+	terminal_register_command_callback(
+		"test_button",
+		"Try sampling the shutdown button",
+		0,
+		terminal_button_test);
+		
+	terminal_register_command_callback(
+		"double_pulse",
+		"Double pulse test",
+		0,
+		terminal_cmd_doublepulse);
+
+	terminal_register_command_callback(
+		"beep",
+		"Buzzer on for n seconds (GPIO or PWM).",
+		"[seconds]",
+		terminal_cmd_beep);
+}
+
+void hw_setup_adc_channels(void) {
+	// ADC1 regular channels
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_0, 1, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 2, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_5, 3, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_14, 4, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_Vrefint, 5, ADC_SampleTime_15Cycles);
+	//ADC_RegularChannelConfig(ADC1, ADC_Channel_8, 6, ADC_SampleTime_15Cycles);
+
+	// ADC2 regular channels
+	ADC_RegularChannelConfig(ADC2, ADC_Channel_1, 1, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC2, ADC_Channel_11, 2, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC2, ADC_Channel_6, 3, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC2, ADC_Channel_15, 4, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC2, ADC_Channel_0, 5, ADC_SampleTime_15Cycles);
+	//ADC_RegularChannelConfig(ADC2, ADC_Channel_9, 6, ADC_SampleTime_15Cycles);
+
+	// ADC3 regular channels
+	ADC_RegularChannelConfig(ADC3, ADC_Channel_2, 1, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC3, ADC_Channel_12, 2, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC3, ADC_Channel_3, 3, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC3, ADC_Channel_13, 4, ADC_SampleTime_15Cycles);
+	ADC_RegularChannelConfig(ADC3, ADC_Channel_1, 5, ADC_SampleTime_15Cycles);
+	//ADC_RegularChannelConfig(ADC3, ADC_Channel_2, 6, ADC_SampleTime_15Cycles);
+
+	// Injected channels
+	ADC_InjectedChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_15Cycles);
+	ADC_InjectedChannelConfig(ADC2, ADC_Channel_11, 1, ADC_SampleTime_15Cycles);
+	ADC_InjectedChannelConfig(ADC3, ADC_Channel_12, 1, ADC_SampleTime_15Cycles);
+	ADC_InjectedChannelConfig(ADC1, ADC_Channel_10, 2, ADC_SampleTime_15Cycles);
+	ADC_InjectedChannelConfig(ADC2, ADC_Channel_11, 2, ADC_SampleTime_15Cycles);
+	ADC_InjectedChannelConfig(ADC3, ADC_Channel_12, 2, ADC_SampleTime_15Cycles);
+	ADC_InjectedChannelConfig(ADC1, ADC_Channel_10, 3, ADC_SampleTime_15Cycles);
+	ADC_InjectedChannelConfig(ADC2, ADC_Channel_11, 3, ADC_SampleTime_15Cycles);
+	ADC_InjectedChannelConfig(ADC3, ADC_Channel_12, 3, ADC_SampleTime_15Cycles);
+}
+
+void hw_start_i2c(void) {
+	i2cAcquireBus(&HW_I2C_DEV);
+
+	if (!i2c_running) {
+		palSetPadMode(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN,
+				PAL_MODE_ALTERNATE(HW_I2C_GPIO_AF) |
+				PAL_STM32_OTYPE_OPENDRAIN |
+				PAL_STM32_OSPEED_MID1 |
+				PAL_STM32_PUDR_PULLUP);
+		palSetPadMode(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN,
+				PAL_MODE_ALTERNATE(HW_I2C_GPIO_AF) |
+				PAL_STM32_OTYPE_OPENDRAIN |
+				PAL_STM32_OSPEED_MID1 |
+				PAL_STM32_PUDR_PULLUP);
+
+		i2cStart(&HW_I2C_DEV, &i2cfg);
+		i2c_running = true;
 	}
-	
-	void hw_setup_adc_channels(void) {
-		// ADC1 regular channels
-		ADC_RegularChannelConfig(ADC1, ADC_Channel_0, 1, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 2, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC1, ADC_Channel_5, 3, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC1, ADC_Channel_14, 4, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC1, ADC_Channel_Vrefint, 5, ADC_SampleTime_15Cycles);
-		//ADC_RegularChannelConfig(ADC1, ADC_Channel_8, 6, ADC_SampleTime_15Cycles);
-	
-		// ADC2 regular channels
-		ADC_RegularChannelConfig(ADC2, ADC_Channel_1, 1, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC2, ADC_Channel_11, 2, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC2, ADC_Channel_6, 3, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC2, ADC_Channel_15, 4, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC2, ADC_Channel_0, 5, ADC_SampleTime_15Cycles);
-		//ADC_RegularChannelConfig(ADC2, ADC_Channel_9, 6, ADC_SampleTime_15Cycles);
-	
-		// ADC3 regular channels
-		ADC_RegularChannelConfig(ADC3, ADC_Channel_2, 1, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC3, ADC_Channel_12, 2, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC3, ADC_Channel_3, 3, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC3, ADC_Channel_13, 4, ADC_SampleTime_15Cycles);
-		ADC_RegularChannelConfig(ADC3, ADC_Channel_1, 5, ADC_SampleTime_15Cycles);
-		//ADC_RegularChannelConfig(ADC3, ADC_Channel_2, 6, ADC_SampleTime_15Cycles);
-	
-		// Injected channels
-		ADC_InjectedChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_15Cycles);
-		ADC_InjectedChannelConfig(ADC2, ADC_Channel_11, 1, ADC_SampleTime_15Cycles);
-		ADC_InjectedChannelConfig(ADC3, ADC_Channel_12, 1, ADC_SampleTime_15Cycles);
-		ADC_InjectedChannelConfig(ADC1, ADC_Channel_10, 2, ADC_SampleTime_15Cycles);
-		ADC_InjectedChannelConfig(ADC2, ADC_Channel_11, 2, ADC_SampleTime_15Cycles);
-		ADC_InjectedChannelConfig(ADC3, ADC_Channel_12, 2, ADC_SampleTime_15Cycles);
-		ADC_InjectedChannelConfig(ADC1, ADC_Channel_10, 3, ADC_SampleTime_15Cycles);
-		ADC_InjectedChannelConfig(ADC2, ADC_Channel_11, 3, ADC_SampleTime_15Cycles);
-		ADC_InjectedChannelConfig(ADC3, ADC_Channel_12, 3, ADC_SampleTime_15Cycles);
+
+	i2cReleaseBus(&HW_I2C_DEV);
+}
+
+void hw_stop_i2c(void) {
+	i2cAcquireBus(&HW_I2C_DEV);
+
+	if (i2c_running) {
+		palSetPadMode(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN, PAL_MODE_INPUT);
+		palSetPadMode(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN, PAL_MODE_INPUT);
+
+		i2cStop(&HW_I2C_DEV);
+		i2c_running = false;
+
 	}
-	
-	void hw_start_i2c(void) {
+
+	i2cReleaseBus(&HW_I2C_DEV);
+}
+
+/**
+	* Try to restore the i2c bus
+	*/
+void hw_try_restore_i2c(void) {
+	if (i2c_running) {
 		i2cAcquireBus(&HW_I2C_DEV);
-	
-		if (!i2c_running) {
-			palSetPadMode(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN,
-					PAL_MODE_ALTERNATE(HW_I2C_GPIO_AF) |
-					PAL_STM32_OTYPE_OPENDRAIN |
-					PAL_STM32_OSPEED_MID1 |
-					PAL_STM32_PUDR_PULLUP);
-			palSetPadMode(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN,
-					PAL_MODE_ALTERNATE(HW_I2C_GPIO_AF) |
-					PAL_STM32_OTYPE_OPENDRAIN |
-					PAL_STM32_OSPEED_MID1 |
-					PAL_STM32_PUDR_PULLUP);
-	
-			i2cStart(&HW_I2C_DEV, &i2cfg);
-			i2c_running = true;
-		}
-	
-		i2cReleaseBus(&HW_I2C_DEV);
-	}
-	
-	void hw_stop_i2c(void) {
-		i2cAcquireBus(&HW_I2C_DEV);
-	
-		if (i2c_running) {
-			palSetPadMode(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN, PAL_MODE_INPUT);
-			palSetPadMode(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN, PAL_MODE_INPUT);
-	
-			i2cStop(&HW_I2C_DEV);
-			i2c_running = false;
-	
-		}
-	
-		i2cReleaseBus(&HW_I2C_DEV);
-	}
-	
-	/**
-	 * Try to restore the i2c bus
-	 */
-	void hw_try_restore_i2c(void) {
-		if (i2c_running) {
-			i2cAcquireBus(&HW_I2C_DEV);
-	
-			palSetPadMode(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN,
-					PAL_STM32_OTYPE_OPENDRAIN |
-					PAL_STM32_OSPEED_MID1 |
-					PAL_STM32_PUDR_PULLUP);
-	
-			palSetPadMode(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN,
-					PAL_STM32_OTYPE_OPENDRAIN |
-					PAL_STM32_OSPEED_MID1 |
-					PAL_STM32_PUDR_PULLUP);
-	
-			palSetPad(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN);
-			palSetPad(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN);
-	
-			chThdSleep(1);
-	
-			for(int i = 0;i < 16;i++) {
-				palClearPad(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN);
-				chThdSleep(1);
-				palSetPad(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN);
-				chThdSleep(1);
-			}
-	
-			// Generate start then stop condition
-			palClearPad(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN);
-			chThdSleep(1);
+
+		palSetPadMode(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN,
+				PAL_STM32_OTYPE_OPENDRAIN |
+				PAL_STM32_OSPEED_MID1 |
+				PAL_STM32_PUDR_PULLUP);
+
+		palSetPadMode(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN,
+				PAL_STM32_OTYPE_OPENDRAIN |
+				PAL_STM32_OSPEED_MID1 |
+				PAL_STM32_PUDR_PULLUP);
+
+		palSetPad(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN);
+		palSetPad(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN);
+
+		chThdSleep(1);
+
+		for(int i = 0;i < 16;i++) {
 			palClearPad(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN);
 			chThdSleep(1);
 			palSetPad(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN);
 			chThdSleep(1);
-			palSetPad(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN);
-	
-			palSetPadMode(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN,
-					PAL_MODE_ALTERNATE(HW_I2C_GPIO_AF) |
-					PAL_STM32_OTYPE_OPENDRAIN |
-					PAL_STM32_OSPEED_MID1 |
-					PAL_STM32_PUDR_PULLUP);
-	
-			palSetPadMode(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN,
-					PAL_MODE_ALTERNATE(HW_I2C_GPIO_AF) |
-					PAL_STM32_OTYPE_OPENDRAIN |
-					PAL_STM32_OSPEED_MID1 |
-					PAL_STM32_PUDR_PULLUP);
-	
-			HW_I2C_DEV.state = I2C_STOP;
-			i2cStart(&HW_I2C_DEV, &i2cfg);
-	
-			i2cReleaseBus(&HW_I2C_DEV);
 		}
-	}
-	
-	bool hw_sample_shutdown_button(void) {
-	
-		chMtxLock(&shutdown_mutex);
-	
-		bt_diff = 0.0;
-	
-		for (int i = 0;i < 3;i++) {
-			palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_INPUT_ANALOG);
-			chThdSleep(5);
-			float val1 = ADC_VOLTS(ADC_IND_SHUTDOWN);
-			chThdSleepMilliseconds(1);
-			float val2 = ADC_VOLTS(ADC_IND_SHUTDOWN);
-			palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_OUTPUT_PUSHPULL);
-			chThdSleepMilliseconds(1);
-	
-			bt_diff += (val1 - val2);
-		}
-	
-		chMtxUnlock(&shutdown_mutex);
-		//return lonpress;
-		return (bt_diff > 0.5);
-	
-	
-	}
-	
-	static void terminal_shutdown_now(int argc, const char **argv) {
-		(void)argc;
-		(void)argv;
-		DISABLE_GATE();
-		HW_SHUTDOWN_HOLD_OFF();
-	}
-	
-	static void terminal_button_test(int argc, const char **argv) {
-		(void)argc;
-		(void)argv;
-	
-		for (int i = 0;i < 40;i++) {
-			commands_printf("BT: %d %.2f", HW_SAMPLE_SHUTDOWN(), (double)bt_diff);
-			chThdSleepMilliseconds(100);
-		}
-	}
-	
-	static void terminal_cmd_beep(int argc, const char **argv) {
-		if (argc < 2) {
-			commands_printf("Usage: beep [milliseconds]");
-			return;
-		}
-	
-		unsigned int ms = 0;
-		sscanf(argv[1], "%u", &ms);
-		if (ms == 0 || ms > 3000U) {
-			commands_printf("Invalid duration (use 0 < ms <= 3000)");
-			return;
-		}
-	
 
-		// this might not be needed
-		timeout_configure_IWDT_slowest();
-		pwm_servo_stop();
-	
-		palSetPadMode(HW_ICU_GPIO, HW_ICU_PIN,
-				PAL_MODE_OUTPUT_PUSHPULL |
-				PAL_STM32_OSPEED_HIGHEST);
-		palSetPad(HW_ICU_GPIO, HW_ICU_PIN);
-		chThdSleepMilliseconds(ms);
-		palClearPad(HW_ICU_GPIO, HW_ICU_PIN);
-	
-		commands_printf("Done");
+		// Generate start then stop condition
+		palClearPad(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN);
+		chThdSleep(1);
+		palClearPad(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN);
+		chThdSleep(1);
+		palSetPad(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN);
+		chThdSleep(1);
+		palSetPad(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN);
+
+		palSetPadMode(HW_I2C_SCL_PORT, HW_I2C_SCL_PIN,
+				PAL_MODE_ALTERNATE(HW_I2C_GPIO_AF) |
+				PAL_STM32_OTYPE_OPENDRAIN |
+				PAL_STM32_OSPEED_MID1 |
+				PAL_STM32_PUDR_PULLUP);
+
+		palSetPadMode(HW_I2C_SDA_PORT, HW_I2C_SDA_PIN,
+				PAL_MODE_ALTERNATE(HW_I2C_GPIO_AF) |
+				PAL_STM32_OTYPE_OPENDRAIN |
+				PAL_STM32_OSPEED_MID1 |
+				PAL_STM32_PUDR_PULLUP);
+
+		HW_I2C_DEV.state = I2C_STOP;
+		i2cStart(&HW_I2C_DEV, &i2cfg);
+
+		i2cReleaseBus(&HW_I2C_DEV);
 	}
-	
-	static void terminal_cmd_beep_pwm(int argc, const char **argv) {
-		if (argc < 3) {
-			commands_printf("Usage: beep_pwm [milliseconds] [freq_hz 100..10000]");
-			return;
-		}
-	
-		unsigned int ms = 0;
-		unsigned int freq_hz = 0;
-		sscanf(argv[1], "%u", &ms);
-		sscanf(argv[2], "%u", &freq_hz);
-		if (ms == 0 || ms > 3000U) {
-			commands_printf("Invalid duration (use 0 < ms <= 3000)");
-			return;
-		}
-		if (freq_hz < 100 || freq_hz > 10000) {
-			commands_printf("Invalid frequency (use 100 <= freq_hz <= 10000)");
-			return;
-		}
-	
-		// this might not be needed
-		timeout_configure_IWDT_slowest();
-		pwm_servo_stop();
-	
-		pwm_servo_init((uint32_t)freq_hz, 0.5f);
-		pwm_servo_set_duty(0.5f);
-		chThdSleepMilliseconds(ms);
-		pwm_servo_stop();
-	
-		commands_printf("Done");
-	}
-	
-	/*
-	float hw_ENNOID_100_125_get_temp(void) {
-		float t1 = (1.0 / ((logf(NTC_RES(ADC_Value[ADC_IND_TEMP_MOS]) / 10000.0) / 3380.0) + (1.0 / 298.15)) - 273.15);
-		float t2 = (1.0 / ((logf(NTC_RES(ADC_Value[ADC_IND_TEMP_MOS_2]) / 10000.0) / 3380.0) + (1.0 / 298.15)) - 273.15);
-		float t3 = (1.0 / ((logf(NTC_RES(ADC_Value[ADC_IND_TEMP_MOS_3]) / 10000.0) / 3380.0) + (1.0 / 298.15)) - 273.15);
-		float res = 0.0;
-	
-		if (t1 > t2 && t1 > t3) {
-			res = t1;
-		} else if (t2 > t1 && t2 > t3) {
-			res = t2;
-		} else {
-			res = t3;
-		}
-	
-		return res;
-	}
-	
-	*/
-	static void terminal_cmd_doublepulse(int argc, const char **argv)
-	{
-		(void)argc;
-		(void)argv;
-	
-		int preface, pulse1, breaktime, pulse2;
-		int utick;
-		int deadtime = -1;
-	
-		TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
-		TIM_OCInitTypeDef  TIM_OCInitStructure;
-		TIM_BDTRInitTypeDef TIM_BDTRInitStructure;
-	
-		if (argc < 5) {
-			commands_printf("Usage: double_pulse <preface> <pulse1> <break> <pulse2> [deadtime]");
-			commands_printf("   preface: idle time in  µs");
-			commands_printf("    pulse1: high time of pulse 1 in µs");
-			commands_printf("     break: break between pulses in µs\n");
-			commands_printf("    pulse2: high time of pulse 2 in µs");
-			commands_printf("  deadtime: overwrite deadtime, in ns");
-			return;
-		}
-		sscanf(argv[1], "%d", &preface);
-		sscanf(argv[2], "%d", &pulse1);
-		sscanf(argv[3], "%d", &breaktime);
-		sscanf(argv[4], "%d", &pulse2);
-		if (argc == 6) {
-			sscanf(argv[5], "%d", &deadtime);
-		}
-		timeout_configure_IWDT_slowest();
-	
-		utick = (int)(SYSTEM_CORE_CLOCK / 1000000);
-		mcpwm_deinit();
-		mcpwm_foc_deinit();
-		//gpdrive_deinit();
-	
-		TIM_Cmd(TIM1, DISABLE);
-		TIM_Cmd(TIM4, DISABLE);
-		//TIM4 als Trigger Timer
-		RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
-	
-		TIM_TimeBaseStructure.TIM_Period = (SYSTEM_CORE_CLOCK / 20000);
-		TIM_TimeBaseStructure.TIM_Prescaler = 0;
-		TIM_TimeBaseStructure.TIM_ClockDivision = 0;
-		TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
-		TIM_TimeBaseInit(TIM4, &TIM_TimeBaseStructure);
-		TIM_SelectMasterSlaveMode(TIM4, TIM_MasterSlaveMode_Enable);
-		TIM_SelectOutputTrigger(TIM4, TIM_TRGOSource_Enable);
-		TIM4->CNT = 0;
-	
-		// TIM1
-		// TIM1 clock enable
-		RCC_APB2PeriphClockCmd(RCC_APB2Periph_TIM1, ENABLE);
-	
-		// Time Base configuration
-		TIM_TimeBaseStructure.TIM_Prescaler = 0;
-		TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
-		TIM_TimeBaseStructure.TIM_Period = (preface + pulse1) * utick;
-		TIM_TimeBaseStructure.TIM_ClockDivision = 0;
-		TIM_TimeBaseStructure.TIM_RepetitionCounter = 0;
-		TIM_TimeBaseInit(TIM1, &TIM_TimeBaseStructure);
-	
-		// Channel 1, 2 and 3 Configuration in PWM mode
-		TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM2;
-		TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
-		TIM_OCInitStructure.TIM_OutputNState = TIM_OutputNState_Enable;
-		TIM_OCInitStructure.TIM_Pulse = preface * utick;
-		TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
-		TIM_OCInitStructure.TIM_OCNPolarity = TIM_OCNPolarity_High;
-		TIM_OCInitStructure.TIM_OCIdleState = TIM_OCIdleState_Set;
-		TIM_OCInitStructure.TIM_OCNIdleState = TIM_OCNIdleState_Set;
-	
-		TIM_OC1Init(TIM1, &TIM_OCInitStructure);
-		TIM_OC1PreloadConfig(TIM1, TIM_OCPreload_Enable);
-		TIM_OC2Init(TIM1, &TIM_OCInitStructure);
-		TIM_OC2PreloadConfig(TIM1, TIM_OCPreload_Enable);
-		TIM_OC3Init(TIM1, &TIM_OCInitStructure);
-		TIM_OC3PreloadConfig(TIM1, TIM_OCPreload_Enable);
-	
-		TIM_SelectOCxM(TIM1, TIM_Channel_1, TIM_OCMode_PWM2);
-		TIM_CCxCmd(TIM1, TIM_Channel_1, TIM_CCx_Enable);
-		TIM_CCxNCmd(TIM1, TIM_Channel_1, TIM_CCxN_Enable);
-	
-		TIM_SelectOCxM(TIM1, TIM_Channel_2, TIM_OCMode_Inactive);
-		TIM_CCxCmd(TIM1, TIM_Channel_2, TIM_CCx_Enable);
-		TIM_CCxNCmd(TIM1, TIM_Channel_2, TIM_CCxN_Enable);
-	
-		TIM_SelectOCxM(TIM1, TIM_Channel_3, TIM_OCMode_Inactive);
-		TIM_CCxCmd(TIM1, TIM_Channel_3, TIM_CCx_Enable);
-		TIM_CCxNCmd(TIM1, TIM_Channel_3, TIM_CCxN_Enable);
-		TIM_GenerateEvent(TIM1, TIM_EventSource_COM);
-	
-	
-		// Automatic Output enable, Break, dead time and lock configuration
-		TIM_BDTRInitStructure.TIM_OSSRState = TIM_OSSRState_Enable;
-		TIM_BDTRInitStructure.TIM_OSSIState = TIM_OSSIState_Enable;
-		TIM_BDTRInitStructure.TIM_LOCKLevel = TIM_LOCKLevel_OFF;
-		if (deadtime < 0) {
-			TIM_BDTRInitStructure.TIM_DeadTime = conf_general_calculate_deadtime(HW_DEAD_TIME_NSEC, SYSTEM_CORE_CLOCK);
-		} else {
-			TIM_BDTRInitStructure.TIM_DeadTime = conf_general_calculate_deadtime(deadtime, SYSTEM_CORE_CLOCK);
-		}
-		TIM_BDTRInitStructure.TIM_Break = TIM_Break_Disable;
-		TIM_BDTRInitStructure.TIM_BreakPolarity = TIM_BreakPolarity_High;
-		TIM_BDTRInitStructure.TIM_AutomaticOutput = TIM_AutomaticOutput_Disable;
-		TIM_BDTRConfig(TIM1, &TIM_BDTRInitStructure);
-	
-		TIM_CCPreloadControl(TIM1, ENABLE);
-		TIM_ARRPreloadConfig(TIM1, ENABLE);
-	
-		TIM1->CNT = 0;
-		TIM1->EGR = TIM_EGR_UG;
-	
-		TIM_SelectSlaveMode(TIM1, TIM_SlaveMode_Trigger);
-		TIM_SelectInputTrigger(TIM1, TIM_TS_ITR3);
-		TIM_SelectOnePulseMode(TIM1, TIM_OPMode_Single);
-		TIM_CtrlPWMOutputs(TIM1, ENABLE);
-	
-		TIM_Cmd(TIM1, ENABLE);
-		//Timer 4 triggert Timer 1
-		TIM_Cmd(TIM4, ENABLE);
-		TIM_Cmd(TIM4, DISABLE);
-		TIM1->ARR = (breaktime + pulse2) * utick;
-		TIM1->CCR1 = breaktime * utick;
-		while (TIM1->CNT != 0);
-		TIM_Cmd(TIM4, ENABLE);
-	
+}
+
+static bool hw_sample_shutdown_button_1(void) {
+	bt_diff = 0.0;
+
+	for (int i = 0;i < 3;i++) {
+		palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_INPUT_ANALOG);
+		chThdSleep(5);
+		float val1 = ADC_VOLTS(ADC_IND_SHUTDOWN);
 		chThdSleepMilliseconds(1);
-		TIM_CtrlPWMOutputs(TIM1, DISABLE);
-		mc_configuration* mcconf = mempools_alloc_mcconf();
-		*mcconf = *mc_interface_get_configuration();
-	
-		switch (mcconf->motor_type) {
-		case MOTOR_TYPE_BLDC:
-		case MOTOR_TYPE_DC:
-			mcpwm_init(mcconf);
-			break;
-	
-		case MOTOR_TYPE_FOC:
-			mcpwm_foc_init(mcconf, mcconf);
-			break;
-	
-		/*case MOTOR_TYPE_GPD:
-			//gpdrive_init(mcconf);
-			break;
-	*/
-		default:
+		float val2 = ADC_VOLTS(ADC_IND_SHUTDOWN);
+		palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_OUTPUT_PUSHPULL);
+		chThdSleepMilliseconds(1);
+
+		bt_diff += (val1 - val2);
+	}
+
+	return (bt_diff > 0.5);
+}
+
+bool hw_sample_shutdown_button(void) {
+
+	chMtxLock(&shutdown_mutex);
+
+	systime_t start_sampling_button_at = chVTGetSystemTimeX();
+	bool is_shutting_down = false;
+	bool button_pressed = false;
+
+	for(;;) {
+		button_pressed = !hw_sample_shutdown_button_1();
+
+		// Shutting down only when button was held for at least HW_SHUTDOWN_HOLD_TIME_MS
+		// and the motor was stationary (<= HW_SHUTDOWN_ERPM_THRESHOLD) during that time
+		if(!button_pressed || fabsf(mc_interface_get_rpm()) > HW_SHUTDOWN_ERPM_THRESHOLD) {
 			break;
 		}
-		commands_printf("Done");
+
+		int pressed_time = (int) ((float)chVTTimeElapsedSinceX(start_sampling_button_at) / (float)CH_CFG_ST_FREQUENCY * 2000.0f);
+		if(pressed_time > HW_SHUTDOWN_HOLD_TIME_MS) {
+			is_shutting_down = true;
+			break;
+		}
+
+		chThdSleepMilliseconds(10);
+	}
+
+	chMtxUnlock(&shutdown_mutex);
+
+	// beep if shutting down
+	if(is_shutting_down) {
+		buzzer_on();
+		chThdSleepMilliseconds(HW_SHUTDOWN_BUZZER_TIME_MS);
+		buzzer_off();
+	}
+	
+	return is_shutting_down;
+}
+
+static void terminal_shutdown_now(int argc, const char **argv) {
+	(void)argc;
+	(void)argv;
+	DISABLE_GATE();
+	HW_SHUTDOWN_HOLD_OFF();
+}
+
+static void terminal_button_test(int argc, const char **argv) {
+	(void)argc;
+	(void)argv;
+
+	for (int i = 0;i < 40;i++) {
+		commands_printf("BT: %d %.2f", HW_SAMPLE_SHUTDOWN(), (double)bt_diff);
+		chThdSleepMilliseconds(100);
+	}
+}
+
+void buzzer_on() {
+	// just in case the servo was not stopped for some reason
+	pwm_servo_stop();
+
+#ifdef BUZZER_USE_PWM
+	pwm_servo_init(BUZZER_PWM_FREQ, 0.5f);
+#else
+	palSetPadMode(HW_ICU_GPIO, HW_ICU_PIN,
+			PAL_MODE_OUTPUT_PUSHPULL |
+			PAL_STM32_OSPEED_HIGHEST);
+	palSetPad(HW_ICU_GPIO, HW_ICU_PIN);
+#endif
+}
+
+void buzzer_off() {
+#ifdef BUZZER_USE_PWM
+	pwm_servo_stop();
+#else
+	palClearPad(HW_ICU_GPIO, HW_ICU_PIN);
+#endif
+}
+
+static void terminal_cmd_beep(int argc, const char **argv) {
+	if (argc < 2) {
+		commands_printf("Usage: beep [milliseconds]");
 		return;
 	}
-	
-	
+
+	unsigned int ms = 0;
+	sscanf(argv[1], "%u", &ms);
+	if (ms == 0 || ms > 60000U) {
+		commands_printf("Invalid duration (use 0 < ms <= 60000)");
+		return;
+	}
+
+	buzzer_on();
+	chThdSleepMilliseconds(ms);
+	buzzer_off();
+
+	commands_printf("Done");
+}
+
+/*
+float hw_ENNOID_100_125_get_temp(void) {
+	float t1 = (1.0 / ((logf(NTC_RES(ADC_Value[ADC_IND_TEMP_MOS]) / 10000.0) / 3380.0) + (1.0 / 298.15)) - 273.15);
+	float t2 = (1.0 / ((logf(NTC_RES(ADC_Value[ADC_IND_TEMP_MOS_2]) / 10000.0) / 3380.0) + (1.0 / 298.15)) - 273.15);
+	float t3 = (1.0 / ((logf(NTC_RES(ADC_Value[ADC_IND_TEMP_MOS_3]) / 10000.0) / 3380.0) + (1.0 / 298.15)) - 273.15);
+	float res = 0.0;
+
+	if (t1 > t2 && t1 > t3) {
+		res = t1;
+	} else if (t2 > t1 && t2 > t3) {
+		res = t2;
+	} else {
+		res = t3;
+	}
+
+	return res;
+}
+
+*/
+static void terminal_cmd_doublepulse(int argc, const char **argv)
+{
+	(void)argc;
+	(void)argv;
+
+	int preface, pulse1, breaktime, pulse2;
+	int utick;
+	int deadtime = -1;
+
+	TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
+	TIM_OCInitTypeDef  TIM_OCInitStructure;
+	TIM_BDTRInitTypeDef TIM_BDTRInitStructure;
+
+	if (argc < 5) {
+		commands_printf("Usage: double_pulse <preface> <pulse1> <break> <pulse2> [deadtime]");
+		commands_printf("   preface: idle time in  µs");
+		commands_printf("    pulse1: high time of pulse 1 in µs");
+		commands_printf("     break: break between pulses in µs\n");
+		commands_printf("    pulse2: high time of pulse 2 in µs");
+		commands_printf("  deadtime: overwrite deadtime, in ns");
+		return;
+	}
+	sscanf(argv[1], "%d", &preface);
+	sscanf(argv[2], "%d", &pulse1);
+	sscanf(argv[3], "%d", &breaktime);
+	sscanf(argv[4], "%d", &pulse2);
+	if (argc == 6) {
+		sscanf(argv[5], "%d", &deadtime);
+	}
+	timeout_configure_IWDT_slowest();
+
+	utick = (int)(SYSTEM_CORE_CLOCK / 1000000);
+	mcpwm_deinit();
+	mcpwm_foc_deinit();
+	//gpdrive_deinit();
+
+	TIM_Cmd(TIM1, DISABLE);
+	TIM_Cmd(TIM4, DISABLE);
+	//TIM4 als Trigger Timer
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
+
+	TIM_TimeBaseStructure.TIM_Period = (SYSTEM_CORE_CLOCK / 20000);
+	TIM_TimeBaseStructure.TIM_Prescaler = 0;
+	TIM_TimeBaseStructure.TIM_ClockDivision = 0;
+	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+	TIM_TimeBaseInit(TIM4, &TIM_TimeBaseStructure);
+	TIM_SelectMasterSlaveMode(TIM4, TIM_MasterSlaveMode_Enable);
+	TIM_SelectOutputTrigger(TIM4, TIM_TRGOSource_Enable);
+	TIM4->CNT = 0;
+
+	// TIM1
+	// TIM1 clock enable
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_TIM1, ENABLE);
+
+	// Time Base configuration
+	TIM_TimeBaseStructure.TIM_Prescaler = 0;
+	TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+	TIM_TimeBaseStructure.TIM_Period = (preface + pulse1) * utick;
+	TIM_TimeBaseStructure.TIM_ClockDivision = 0;
+	TIM_TimeBaseStructure.TIM_RepetitionCounter = 0;
+	TIM_TimeBaseInit(TIM1, &TIM_TimeBaseStructure);
+
+	// Channel 1, 2 and 3 Configuration in PWM mode
+	TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM2;
+	TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+	TIM_OCInitStructure.TIM_OutputNState = TIM_OutputNState_Enable;
+	TIM_OCInitStructure.TIM_Pulse = preface * utick;
+	TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+	TIM_OCInitStructure.TIM_OCNPolarity = TIM_OCNPolarity_High;
+	TIM_OCInitStructure.TIM_OCIdleState = TIM_OCIdleState_Set;
+	TIM_OCInitStructure.TIM_OCNIdleState = TIM_OCNIdleState_Set;
+
+	TIM_OC1Init(TIM1, &TIM_OCInitStructure);
+	TIM_OC1PreloadConfig(TIM1, TIM_OCPreload_Enable);
+	TIM_OC2Init(TIM1, &TIM_OCInitStructure);
+	TIM_OC2PreloadConfig(TIM1, TIM_OCPreload_Enable);
+	TIM_OC3Init(TIM1, &TIM_OCInitStructure);
+	TIM_OC3PreloadConfig(TIM1, TIM_OCPreload_Enable);
+
+	TIM_SelectOCxM(TIM1, TIM_Channel_1, TIM_OCMode_PWM2);
+	TIM_CCxCmd(TIM1, TIM_Channel_1, TIM_CCx_Enable);
+	TIM_CCxNCmd(TIM1, TIM_Channel_1, TIM_CCxN_Enable);
+
+	TIM_SelectOCxM(TIM1, TIM_Channel_2, TIM_OCMode_Inactive);
+	TIM_CCxCmd(TIM1, TIM_Channel_2, TIM_CCx_Enable);
+	TIM_CCxNCmd(TIM1, TIM_Channel_2, TIM_CCxN_Enable);
+
+	TIM_SelectOCxM(TIM1, TIM_Channel_3, TIM_OCMode_Inactive);
+	TIM_CCxCmd(TIM1, TIM_Channel_3, TIM_CCx_Enable);
+	TIM_CCxNCmd(TIM1, TIM_Channel_3, TIM_CCxN_Enable);
+	TIM_GenerateEvent(TIM1, TIM_EventSource_COM);
+
+
+	// Automatic Output enable, Break, dead time and lock configuration
+	TIM_BDTRInitStructure.TIM_OSSRState = TIM_OSSRState_Enable;
+	TIM_BDTRInitStructure.TIM_OSSIState = TIM_OSSIState_Enable;
+	TIM_BDTRInitStructure.TIM_LOCKLevel = TIM_LOCKLevel_OFF;
+	if (deadtime < 0) {
+		TIM_BDTRInitStructure.TIM_DeadTime = conf_general_calculate_deadtime(HW_DEAD_TIME_NSEC, SYSTEM_CORE_CLOCK);
+	} else {
+		TIM_BDTRInitStructure.TIM_DeadTime = conf_general_calculate_deadtime(deadtime, SYSTEM_CORE_CLOCK);
+	}
+	TIM_BDTRInitStructure.TIM_Break = TIM_Break_Disable;
+	TIM_BDTRInitStructure.TIM_BreakPolarity = TIM_BreakPolarity_High;
+	TIM_BDTRInitStructure.TIM_AutomaticOutput = TIM_AutomaticOutput_Disable;
+	TIM_BDTRConfig(TIM1, &TIM_BDTRInitStructure);
+
+	TIM_CCPreloadControl(TIM1, ENABLE);
+	TIM_ARRPreloadConfig(TIM1, ENABLE);
+
+	TIM1->CNT = 0;
+	TIM1->EGR = TIM_EGR_UG;
+
+	TIM_SelectSlaveMode(TIM1, TIM_SlaveMode_Trigger);
+	TIM_SelectInputTrigger(TIM1, TIM_TS_ITR3);
+	TIM_SelectOnePulseMode(TIM1, TIM_OPMode_Single);
+	TIM_CtrlPWMOutputs(TIM1, ENABLE);
+
+	TIM_Cmd(TIM1, ENABLE);
+	//Timer 4 triggert Timer 1
+	TIM_Cmd(TIM4, ENABLE);
+	TIM_Cmd(TIM4, DISABLE);
+	TIM1->ARR = (breaktime + pulse2) * utick;
+	TIM1->CCR1 = breaktime * utick;
+	while (TIM1->CNT != 0);
+	TIM_Cmd(TIM4, ENABLE);
+
+	chThdSleepMilliseconds(1);
+	TIM_CtrlPWMOutputs(TIM1, DISABLE);
+	mc_configuration* mcconf = mempools_alloc_mcconf();
+	*mcconf = *mc_interface_get_configuration();
+
+	switch (mcconf->motor_type) {
+	case MOTOR_TYPE_BLDC:
+	case MOTOR_TYPE_DC:
+		mcpwm_init(mcconf);
+		break;
+
+	case MOTOR_TYPE_FOC:
+		mcpwm_foc_init(mcconf, mcconf);
+		break;
+
+	/*case MOTOR_TYPE_GPD:
+		//gpdrive_init(mcconf);
+		break;
+*/
+	default:
+		break;
+	}
+	commands_printf("Done");
+	return;
+}
+

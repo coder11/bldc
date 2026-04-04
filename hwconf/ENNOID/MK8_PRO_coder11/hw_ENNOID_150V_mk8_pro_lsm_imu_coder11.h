@@ -27,6 +27,10 @@
 //#define HW_HAS_PHASE_SHUNTS
 #define INVERTED_SHUNT_POLARITY
 
+// Buzzer
+// #define BUZZER_USE_PWM
+// #define BUZZER_PWM_FREQ			2000 // passive buzzers usually have resonant frequency at 2kHz
+
 // Macros
 #define LED_GREEN_GPIO			GPIOB
 #define LED_GREEN_PIN			5
@@ -59,15 +63,15 @@
 #define HW_SHUTDOWN_HOLD_OFF()	palClearPad(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN)
 #define HW_SAMPLE_SHUTDOWN()	hw_sample_shutdown_button()
 
-//hold shutdown pin early to wake up on short pulses
-#define HW_EARLY_INIT()			palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_OUTPUT_PUSHPULL); \
-								HW_SHUTDOWN_HOLD_ON(); \
-								/*palSetPadMode(GPIOD, 2, \
-								PAL_MODE_OUTPUT_PUSHPULL | \
-								PAL_STM32_OSPEED_HIGHEST); \
-								CURRENT_FILTER_ON()
+// Shutdown and startup params
+#define HW_SHUTDOWN_HOLD_TIME_MS	1500
+#define HW_STARTUP_HOLD_TIME_MS		1500
+#define HW_SHUTDOWN_ERPM_THRESHOLD  500
+#define HW_STARTUP_BUZZER_TIME_MS	100
+#define HW_SHUTDOWN_BUZZER_TIME_MS	100
 
-*/
+//hold shutdown pin early to wake up on short pulses
+#define HW_EARLY_INIT()			hw_early_init_begin()
 
 /*
  * ADC Vector
@@ -290,8 +294,10 @@
 #define HW_LIM_DUTY_MAX			0.0, 0.99
 #define HW_LIM_TEMP_FET			-40.0, 110.0
 
+
 // HW-specific functions
 bool hw_sample_shutdown_button(void);
+void hw_early_init_begin(void);
 
 #endif
 
