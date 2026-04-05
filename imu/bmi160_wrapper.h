@@ -29,6 +29,7 @@
 #include "i2c_bb.h"
 #include "spi_bb.h"
 #include "bmi160.h"
+#include "datatypes.h"
 
 typedef struct {
 	void(*read_callback)(float *accel, float *gyro, float *mag);
@@ -37,6 +38,8 @@ typedef struct {
 	volatile bool should_stop;
 	int rate_hz;
 	IMU_FILTER filter;
+	IMU_ACCEL_FS accel_fs;
+	IMU_GYRO_FS gyro_fs;
 } BMI_STATE;
 
 void bmi160_wrapper_init(BMI_STATE *s, stkalign_t *work_area, size_t work_area_size);

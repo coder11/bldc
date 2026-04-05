@@ -839,10 +839,26 @@ typedef enum {
 	IMU_FILTER_HIGH
 } IMU_FILTER;
 
+typedef enum {
+	IMU_ACCEL_FS_2G = 0,
+	IMU_ACCEL_FS_4G,
+	IMU_ACCEL_FS_8G,
+	IMU_ACCEL_FS_16G
+} IMU_ACCEL_FS;
+
+typedef enum {
+	IMU_GYRO_FS_250DPS = 0,
+	IMU_GYRO_FS_500DPS,
+	IMU_GYRO_FS_1000DPS,
+	IMU_GYRO_FS_2000DPS
+} IMU_GYRO_FS;
+
 typedef struct {
 	IMU_TYPE type;
 	AHRS_MODE mode;
 	IMU_FILTER filter;
+	IMU_ACCEL_FS accel_fs;
+	IMU_GYRO_FS gyro_fs;
 	float accel_lowpass_filter_x;
 	float accel_lowpass_filter_y;
 	float accel_lowpass_filter_z;

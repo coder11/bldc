@@ -319,6 +319,8 @@ int32_t confgenerator_serialize_appconf(uint8_t *buffer, const app_configuration
 	buffer[ind++] = conf->imu_conf.type;
 	buffer[ind++] = conf->imu_conf.mode;
 	buffer[ind++] = conf->imu_conf.filter;
+	buffer[ind++] = conf->imu_conf.accel_fs;
+	buffer[ind++] = conf->imu_conf.gyro_fs;
 	buffer_append_float16(buffer, conf->imu_conf.accel_lowpass_filter_x, 1, &ind);
 	buffer_append_float16(buffer, conf->imu_conf.accel_lowpass_filter_y, 1, &ind);
 	buffer_append_float16(buffer, conf->imu_conf.accel_lowpass_filter_z, 1, &ind);
@@ -662,6 +664,8 @@ bool confgenerator_deserialize_appconf(const uint8_t *buffer, app_configuration 
 	conf->imu_conf.type = buffer[ind++];
 	conf->imu_conf.mode = buffer[ind++];
 	conf->imu_conf.filter = buffer[ind++];
+	conf->imu_conf.accel_fs = buffer[ind++];
+	conf->imu_conf.gyro_fs = buffer[ind++];
 	conf->imu_conf.accel_lowpass_filter_x = buffer_get_float16(buffer, 1, &ind);
 	conf->imu_conf.accel_lowpass_filter_y = buffer_get_float16(buffer, 1, &ind);
 	conf->imu_conf.accel_lowpass_filter_z = buffer_get_float16(buffer, 1, &ind);
@@ -989,6 +993,8 @@ void confgenerator_set_defaults_appconf(app_configuration *conf) {
 	conf->imu_conf.type = APPCONF_IMU_TYPE;
 	conf->imu_conf.mode = APPCONF_IMU_AHRS_MODE;
 	conf->imu_conf.filter = APPCONF_IMU_FILTER;
+	conf->imu_conf.accel_fs = APPCONF_IMU_ACCEL_FS;
+	conf->imu_conf.gyro_fs = APPCONF_IMU_GYRO_FS;
 	conf->imu_conf.accel_lowpass_filter_x = APPCONF_IMU_ACCEL_LOWPASS_FILTER_X;
 	conf->imu_conf.accel_lowpass_filter_y = APPCONF_IMU_ACCEL_LOWPASS_FILTER_Y;
 	conf->imu_conf.accel_lowpass_filter_z = APPCONF_IMU_ACCEL_LOWPASS_FILTER_Z;

@@ -22,6 +22,7 @@
  */
 
 #include "conf_general.h"
+#include "datatypes.h"
 #include "mpu9150.h"
 #include "utils_math.h"
 #include "stm32f4xx_conf.h"
@@ -61,6 +62,10 @@ static volatile bool is_running;
 static volatile bool should_stop;
 static volatile int rate_hz = 200;
 static volatile bool use_magnetometer = true;
+static uint8_t mpu9150_accel_fs_sel = MPU9150_ACCEL_FS_16;
+static uint8_t mpu9150_gyro_fs_sel = MPU9150_GYRO_FS_2000;
+static float mpu9150_accel_fs_g = 16.0f;
+static float mpu9150_gyro_fs_dps = 2000.0f;
 
 // Private functions
 static int reset_init_mpu(void);
@@ -243,15 +248,15 @@ void mpu9150_get_raw_accel_gyro_mag(int16_t *accel_gyro_mag) {
 }
 
 void mpu9150_get_accel(float *accel) {
-	accel[0] = (float)raw_accel_gyro_mag[0] * 16.0 / 32768.0;
-	accel[1] = (float)raw_accel_gyro_mag[1] * 16.0 / 32768.0;
-	accel[2] = (float)raw_accel_gyro_mag[2] * 16.0 / 32768.0;
+	accel[0] = (float)raw_accel_gyro_mag[0] * mpu9150_accel_fs_g / 32768.0;
+	accel[1] = (float)raw_accel_gyro_mag[1] * mpu9150_accel_fs_g / 32768.0;
+	accel[2] = (float)raw_accel_gyro_mag[2] * mpu9150_accel_fs_g / 32768.0;
 }
 
 void mpu9150_get_gyro(float *gyro) {
-	gyro[0] = (float)raw_accel_gyro_mag[3] * 2000.0 / 32768.0;
-	gyro[1] = (float)raw_accel_gyro_mag[4] * 2000.0 / 32768.0;
-	gyro[2] = (float)raw_accel_gyro_mag[5] * 2000.0 / 32768.0;
+	gyro[0] = (float)raw_accel_gyro_mag[3] * mpu9150_gyro_fs_dps / 32768.0;
+	gyro[1] = (float)raw_accel_gyro_mag[4] * mpu9150_gyro_fs_dps / 32768.0;
+	gyro[2] = (float)raw_accel_gyro_mag[5] * mpu9150_gyro_fs_dps / 32768.0;
 }
 
 void mpu9150_get_mag(float *mag) {
@@ -274,6 +279,50 @@ void mpu9150_get_accel_gyro_mag(float *accel, float *gyro, float *mag) {
 
 void mpu9150_set_rate_hz(int hz) {
 	rate_hz = hz;
+}
+
+void mpu9150_set_accel_fs(IMU_ACCEL_FS fs) {
+	switch (fs) {
+	case IMU_ACCEL_FS_2G:
+		mpu9150_accel_fs_sel = MPU9150_ACCEL_FS_2;
+		mpu9150_accel_fs_g = 2.0f;
+		break;
+	case IMU_ACCEL_FS_4G:
+		mpu9150_accel_fs_sel = MPU9150_ACCEL_FS_4;
+		mpu9150_accel_fs_g = 4.0f;
+		break;
+	case IMU_ACCEL_FS_8G:
+		mpu9150_accel_fs_sel = MPU9150_ACCEL_FS_8;
+		mpu9150_accel_fs_g = 8.0f;
+		break;
+	case IMU_ACCEL_FS_16G:
+	default:
+		mpu9150_accel_fs_sel = MPU9150_ACCEL_FS_16;
+		mpu9150_accel_fs_g = 16.0f;
+		break;
+	}
+}
+
+void mpu9150_set_gyro_fs(IMU_GYRO_FS fs) {
+	switch (fs) {
+	case IMU_GYRO_FS_250DPS:
+		mpu9150_gyro_fs_sel = MPU9150_GYRO_FS_250;
+		mpu9150_gyro_fs_dps = 250.0f;
+		break;
+	case IMU_GYRO_FS_500DPS:
+		mpu9150_gyro_fs_sel = MPU9150_GYRO_FS_500;
+		mpu9150_gyro_fs_dps = 500.0f;
+		break;
+	case IMU_GYRO_FS_1000DPS:
+		mpu9150_gyro_fs_sel = MPU9150_GYRO_FS_1000;
+		mpu9150_gyro_fs_dps = 1000.0f;
+		break;
+	case IMU_GYRO_FS_2000DPS:
+	default:
+		mpu9150_gyro_fs_sel = MPU9150_GYRO_FS_2000;
+		mpu9150_gyro_fs_dps = 2000.0f;
+		break;
+	}
 }
 
 void mpu9150_set_mag_enabled(bool enabled) {
@@ -402,18 +451,18 @@ static int reset_init_mpu(void) {
 		}
 	}
 
-	// Set accelerometer full-scale range to +/- 16g
+	// Set accelerometer full-scale range
 	tx_buf[0] = MPU9150_ACCEL_CONFIG;
-	tx_buf[1] = MPU9150_ACCEL_FS_16 << MPU9150_ACONFIG_AFS_SEL_BIT;
+	tx_buf[1] = mpu9150_accel_fs_sel << MPU9150_ACONFIG_AFS_SEL_BIT;
 	res = i2c_bb_tx_rx(&i2cs, mpu_addr, tx_buf, 2, rx_buf, 0);
 
 	if (!res) {
 		return 0;
 	}
 
-	// Set gyroscope full-scale range to +/- 2000 deg/s
+	// Set gyroscope full-scale range
 	tx_buf[0] = MPU9150_GYRO_CONFIG;
-	tx_buf[1] = MPU9150_GYRO_FS_2000 << MPU9150_GCONFIG_FS_SEL_BIT;
+	tx_buf[1] = mpu9150_gyro_fs_sel << MPU9150_GCONFIG_FS_SEL_BIT;
 	res = i2c_bb_tx_rx(&i2cs, mpu_addr, tx_buf, 2, rx_buf, 0);
 
 	if (!res) {

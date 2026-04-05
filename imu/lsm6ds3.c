@@ -31,6 +31,8 @@ static i2c_bb_state *m_i2c_bb;
 static volatile uint16_t lsm6ds3_addr;
 static int rate_hz = 1000;
 static IMU_FILTER filter;
+static IMU_ACCEL_FS accel_fs = IMU_ACCEL_FS_16G;
+static IMU_GYRO_FS gyro_fs = IMU_GYRO_FS_2000DPS;
 
 static void terminal_read_reg(int argc, const char **argv);
 static uint8_t read_single_reg(uint8_t reg);
@@ -46,6 +48,54 @@ void lsm6ds3_set_rate_hz(int hz) {
 
 void lsm6ds3_set_filter(IMU_FILTER f) {
 	filter = f;
+}
+
+void lsm6ds3_set_accel_fs(IMU_ACCEL_FS fs) {
+	accel_fs = fs;
+}
+
+void lsm6ds3_set_gyro_fs(IMU_GYRO_FS fs) {
+	gyro_fs = fs;
+}
+
+static uint8_t lsm6ds3_reg_fs_xl(IMU_ACCEL_FS fs) {
+	switch (fs) {
+	case IMU_ACCEL_FS_2G: return LSM6DS3_ACC_GYRO_FS_XL_2g;
+	case IMU_ACCEL_FS_4G: return LSM6DS3_ACC_GYRO_FS_XL_4g;
+	case IMU_ACCEL_FS_8G: return LSM6DS3_ACC_GYRO_FS_XL_8g;
+	case IMU_ACCEL_FS_16G: return LSM6DS3_ACC_GYRO_FS_XL_16g;
+	default: return LSM6DS3_ACC_GYRO_FS_XL_16g;
+	}
+}
+
+static uint8_t lsm6ds3_reg_fs_g(IMU_GYRO_FS fs) {
+	switch (fs) {
+	case IMU_GYRO_FS_250DPS: return LSM6DS3_ACC_GYRO_FS_G_245dps;
+	case IMU_GYRO_FS_500DPS: return LSM6DS3_ACC_GYRO_FS_G_500dps;
+	case IMU_GYRO_FS_1000DPS: return LSM6DS3_ACC_GYRO_FS_G_1000dps;
+	case IMU_GYRO_FS_2000DPS: return LSM6DS3_ACC_GYRO_FS_G_2000dps;
+	default: return LSM6DS3_ACC_GYRO_FS_G_2000dps;
+	}
+}
+
+static float lsm6ds3_fs_xl_g(IMU_ACCEL_FS fs) {
+	switch (fs) {
+	case IMU_ACCEL_FS_2G: return 2.0f;
+	case IMU_ACCEL_FS_4G: return 4.0f;
+	case IMU_ACCEL_FS_8G: return 8.0f;
+	case IMU_ACCEL_FS_16G: return 16.0f;
+	default: return 16.0f;
+	}
+}
+
+static float lsm6ds3_fs_g_dps(IMU_GYRO_FS fs) {
+	switch (fs) {
+	case IMU_GYRO_FS_250DPS: return 245.0f;
+	case IMU_GYRO_FS_500DPS: return 500.0f;
+	case IMU_GYRO_FS_1000DPS: return 1000.0f;
+	case IMU_GYRO_FS_2000DPS: return 2000.0f;
+	default: return 2000.0f;
+	}
 }
 
 void lsm6ds3_init(i2c_bb_state *i2c_state,
@@ -84,7 +134,7 @@ void lsm6ds3_init(i2c_bb_state *i2c_state,
 	// Configure imu
 	// Set all accel speeds
 	txb[0] = LSM6DS3_ACC_GYRO_CTRL1_XL;
-	txb[1] = LSM6DS3_ACC_GYRO_BW_XL_400Hz | LSM6DS3_ACC_GYRO_FS_XL_16g;
+	txb[1] = LSM6DS3_ACC_GYRO_BW_XL_400Hz | lsm6ds3_reg_fs_xl(accel_fs);
 	if (rate_hz <= 13) {
 		txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_13Hz;
 	} else if (rate_hz <= 26){
@@ -135,7 +185,7 @@ void lsm6ds3_init(i2c_bb_state *i2c_state,
 
 	// Set all gyro speeds
 	txb[0] = LSM6DS3_ACC_GYRO_CTRL2_G;
-	txb[1] = LSM6DS3_ACC_GYRO_FS_G_2000dps;
+	txb[1] = lsm6ds3_reg_fs_g(gyro_fs);
 	if (rate_hz <= 13){
 		txb[1] |= LSM6DS3_ACC_GYRO_ODR_G_13Hz;
 	} else if (rate_hz <= 26){
@@ -272,13 +322,18 @@ static THD_FUNCTION(lsm6ds3_thread, arg) {
 		txb[0] = LSM6DS3_ACC_GYRO_OUTX_L_G;
 		bool res = i2c_bb_tx_rx(m_i2c_bb, lsm6ds3_addr, txb, 1, rxb, 12);
 
-		// Parse 6 axis values
-		float gx = (float)((int16_t)((uint16_t)rxb[1] << 8) + rxb[0]) * 4.375 * (2000 / 125) / 1000;
-		float gy = (float)((int16_t)((uint16_t)rxb[3] << 8) + rxb[2]) * 4.375 * (2000 / 125) / 1000;
-		float gz = (float)((int16_t)((uint16_t)rxb[5] << 8) + rxb[4]) * 4.375 * (2000 / 125) / 1000;
-		float ax = (float)((int16_t)((uint16_t)rxb[7] << 8) + rxb[6]) * 0.061 * (16 >> 1) / 1000;
-		float ay = (float)((int16_t)((uint16_t)rxb[9] << 8) + rxb[8]) * 0.061 * (16 >> 1) / 1000;
-		float az = (float)((int16_t)((uint16_t)rxb[11] << 8) + rxb[10]) * 0.061 * (16 >> 1) / 1000;
+		// Parse 6 axis values (gyro deg/s, accel g — same convention as before at ±16g / ±2000 dps)
+		const float fs_dps = lsm6ds3_fs_g_dps(gyro_fs);
+		const float gyro_dps_per_lsb = (70.0f * (fs_dps / 2000.0f)) / 1000.0f;
+		const float gx = (float)((int16_t)((uint16_t)rxb[1] << 8) + rxb[0]) * gyro_dps_per_lsb;
+		const float gy = (float)((int16_t)((uint16_t)rxb[3] << 8) + rxb[2]) * gyro_dps_per_lsb;
+		const float gz = (float)((int16_t)((uint16_t)rxb[5] << 8) + rxb[4]) * gyro_dps_per_lsb;
+
+		const float fs_xl_g = lsm6ds3_fs_xl_g(accel_fs);
+		const float accel_g_per_lsb = 0.061f * (fs_xl_g / 2.0f) / 1000.0f;
+		const float ax = (float)((int16_t)((uint16_t)rxb[7] << 8) + rxb[6]) * accel_g_per_lsb;
+		const float ay = (float)((int16_t)((uint16_t)rxb[9] << 8) + rxb[8]) * accel_g_per_lsb;
+		const float az = (float)((int16_t)((uint16_t)rxb[11] << 8) + rxb[10]) * accel_g_per_lsb;
 
 		if (res && read_callback) {
 			float tmp_accel[3] = {ax,ay,az}, tmp_gyro[3] = {gx,gy,gz}, tmp_mag[3] = {1,2,3};

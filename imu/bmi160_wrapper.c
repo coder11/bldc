@@ -30,6 +30,47 @@ static THD_FUNCTION(bmi_thread, arg);
 static bool reset_init_bmi(BMI_STATE *s);
 void user_delay_ms(uint32_t ms);
 
+static uint8_t imu_to_bmi160_accel_range(IMU_ACCEL_FS fs) {
+	switch (fs) {
+	case IMU_ACCEL_FS_2G: return BMI160_ACCEL_RANGE_2G;
+	case IMU_ACCEL_FS_4G: return BMI160_ACCEL_RANGE_4G;
+	case IMU_ACCEL_FS_8G: return BMI160_ACCEL_RANGE_8G;
+	case IMU_ACCEL_FS_16G: return BMI160_ACCEL_RANGE_16G;
+	default: return BMI160_ACCEL_RANGE_16G;
+	}
+}
+
+static uint8_t imu_to_bmi160_gyro_range(IMU_GYRO_FS fs) {
+	switch (fs) {
+	case IMU_GYRO_FS_250DPS: return BMI160_GYRO_RANGE_250_DPS;
+	case IMU_GYRO_FS_500DPS: return BMI160_GYRO_RANGE_500_DPS;
+	case IMU_GYRO_FS_1000DPS: return BMI160_GYRO_RANGE_1000_DPS;
+	case IMU_GYRO_FS_2000DPS: return BMI160_GYRO_RANGE_2000_DPS;
+	default: return BMI160_GYRO_RANGE_2000_DPS;
+	}
+	
+}
+
+static float imu_gyro_fs_nominal_dps(IMU_GYRO_FS fs) {
+	switch (fs) {
+	case IMU_GYRO_FS_250DPS: return 250.0f;
+	case IMU_GYRO_FS_500DPS: return 500.0f;
+	case IMU_GYRO_FS_1000DPS: return 1000.0f;
+	case IMU_GYRO_FS_2000DPS: return 2000.0f;
+	default: return 2000.0f;
+	}
+}
+
+static float imu_accel_fs_nominal_g(IMU_ACCEL_FS fs) {
+	switch (fs) {
+	case IMU_ACCEL_FS_2G: return 2.0f;
+	case IMU_ACCEL_FS_4G: return 4.0f;
+	case IMU_ACCEL_FS_8G: return 8.0f;
+	case IMU_ACCEL_FS_16G: return 16.0f;
+	default: return 16.0f;
+	}
+}
+
 void bmi160_wrapper_init(BMI_STATE *s, stkalign_t *work_area, size_t work_area_size) {
 	s->read_callback = 0;
 
@@ -61,10 +102,10 @@ static bool reset_init_bmi(BMI_STATE *s) {
 
 	bmi160_init(&(s->sensor));
 
-	s->sensor.accel_cfg.range = BMI160_ACCEL_RANGE_16G;
+	s->sensor.accel_cfg.range = imu_to_bmi160_accel_range(s->accel_fs);
 	s->sensor.accel_cfg.power = BMI160_ACCEL_NORMAL_MODE;
 
-	s->sensor.gyro_cfg.range = BMI160_GYRO_RANGE_2000_DPS;
+	s->sensor.gyro_cfg.range = imu_to_bmi160_gyro_range(s->gyro_fs);
 	s->sensor.gyro_cfg.power = BMI160_GYRO_NORMAL_MODE;
 
 	if(s->rate_hz <= 25){
@@ -140,13 +181,16 @@ static THD_FUNCTION(bmi_thread, arg) {
 
 		float tmp_accel[3], tmp_gyro[3], tmp_mag[3];
 
-		tmp_accel[0] = (float)accel.x * 16.0 / 32768.0;
-		tmp_accel[1] = (float)accel.y * 16.0 / 32768.0;
-		tmp_accel[2] = (float)accel.z * 16.0 / 32768.0;
+		const float ag = imu_accel_fs_nominal_g(s->accel_fs);
+		const float gd = imu_gyro_fs_nominal_dps(s->gyro_fs);
 
-		tmp_gyro[0] = (float)gyro.x * 2000.0 / 32768.0;
-		tmp_gyro[1] = (float)gyro.y * 2000.0 / 32768.0;
-		tmp_gyro[2] = (float)gyro.z * 2000.0 / 32768.0;
+		tmp_accel[0] = (float)accel.x * ag / 32768.0;
+		tmp_accel[1] = (float)accel.y * ag / 32768.0;
+		tmp_accel[2] = (float)accel.z * ag / 32768.0;
+
+		tmp_gyro[0] = (float)gyro.x * gd / 32768.0;
+		tmp_gyro[1] = (float)gyro.y * gd / 32768.0;
+		tmp_gyro[2] = (float)gyro.z * gd / 32768.0;
 
 		memset(tmp_mag, 0, sizeof(tmp_mag));
 

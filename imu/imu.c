@@ -62,7 +62,9 @@ static void (*m_read_callback)(float *acc, float *gyro, float *mag, float dt) = 
 
 void imu_init(imu_config *set) {
 	bool imu_changed = set->sample_rate_hz != m_settings.sample_rate_hz ||
-			set->type != m_settings.type;
+			set->type != m_settings.type ||
+			set->accel_fs != m_settings.accel_fs ||
+			set->gyro_fs != m_settings.gyro_fs;
 
 	m_settings = *set;
 
@@ -98,13 +100,19 @@ void imu_init(imu_config *set) {
 	imu_reset_orientation();
 
 	mpu9150_set_mag_enabled(set->use_magnetometer);
+	mpu9150_set_accel_fs(set->accel_fs);
+	mpu9150_set_gyro_fs(set->gyro_fs);
 	mpu9150_set_rate_hz(MIN(set->sample_rate_hz, 1000));
 	m_icm20948_state.rate_hz = MIN(set->sample_rate_hz, 1000);
 	m_bmi_state.rate_hz = set->sample_rate_hz;
 	lsm6ds3_set_rate_hz(set->sample_rate_hz);
 
 	m_bmi_state.filter = set->filter;
+	m_bmi_state.accel_fs = set->accel_fs;
+	m_bmi_state.gyro_fs = set->gyro_fs;
 	lsm6ds3_set_filter(set->filter);
+	lsm6ds3_set_accel_fs(set->accel_fs);
+	lsm6ds3_set_gyro_fs(set->gyro_fs);
 
 	if (set->type == IMU_TYPE_INTERNAL) {
 #ifdef MPU9X50_SDA_GPIO
