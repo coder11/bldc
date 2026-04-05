@@ -59,31 +59,31 @@ static void terminal_cmd_beep(int argc, const char **argv);
 static void buzzer_on(void);
 static void buzzer_off(void);
 
-// static void hw_early_init_end(void) {
-// 	// wait for the button to be held for at least HW_STARTUP_HOLD_TIME_MS
-// 	do() {
-// 		chThdSleepMilliseconds(10);
-// 		float time_elapsed_after_turned_on = chVTTimeElapsedSinceX(turned_on_at) / (float)CH_CFG_ST_FREQUENCY;
-// 	} while(time_elapsed_after_turned_on < HW_STARTUP_HOLD_TIME_MS);
+static THD_WORKING_AREA(hw_early_init_thread_wa, 256);
 
-// 	// turn the power on
-// 	HW_SHUTDOWN_HOLD_ON();
-// 	buzzer_on();
-// 	chThdSleepMilliseconds(HW_STARTUP_BUZZER_TIME_MS);
-// 	buzzer_off();
-// }
+static THD_FUNCTION(hw_early_init_end, arg) {
+	(void)arg;
 
-void hw_early_init_begin(void) {
-	palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_OUTPUT_PUSHPULL);
-	turned_on_at = chVTGetSystemTimeX();
-	
-	// TODO: implement and switch to this
-	// chThdCreateStatic(hw_early_init_end);
+	chRegSetThreadName("early_init");
+
+	// wait for the button to be held for at least HW_STARTUP_HOLD_TIME_MS
+	while (chVTTimeElapsedSinceX(turned_on_at) < MS2ST(HW_STARTUP_HOLD_TIME_MS)) {
+		chThdSleepMilliseconds(10);
+	}
 
 	HW_SHUTDOWN_HOLD_ON();
 	buzzer_on();
 	chThdSleepMilliseconds(HW_STARTUP_BUZZER_TIME_MS);
 	buzzer_off();
+}
+
+void hw_early_init_begin(void) {
+	palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_OUTPUT_PUSHPULL);
+	HW_SHUTDOWN_HOLD_OFF();
+	turned_on_at = chVTGetSystemTimeX();
+
+	chThdCreateStatic(hw_early_init_thread_wa, sizeof(hw_early_init_thread_wa),
+			NORMALPRIO, hw_early_init_end, NULL);
 }
 
 void hw_init_gpio(void) {
@@ -358,7 +358,7 @@ bool hw_sample_shutdown_button(void) {
 			break;
 		}
 
-		int pressed_time = (int) ((float)chVTTimeElapsedSinceX(start_sampling_button_at) / (float)CH_CFG_ST_FREQUENCY * 2000.0f);
+		uint32_t pressed_time = ST2MS(chVTTimeElapsedSinceX(start_sampling_button_at));
 		if(pressed_time > HW_SHUTDOWN_HOLD_TIME_MS) {
 			is_shutting_down = true;
 			break;
