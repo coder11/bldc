@@ -24,16 +24,33 @@
 #include "utils_math.h"
 
 #include <stdio.h>
+#include <string.h>
 
+#define LSM6DS3_RATE_HZ_MAX				6660
+#define LSM6DS3_RATE_HZ_MAX_STANDARD_GYRO		1660
+
+#ifndef LSM6DS3_SMA_FILTER_LEN
+#define LSM6DS3_SMA_FILTER_LEN				4
+#endif
+
+#if LSM6DS3_SMA_FILTER_LEN < 1
+#error "LSM6DS3_SMA_FILTER_LEN must be at least 1"
+#endif
 
 static thread_t *lsm6ds3_thread_ref = NULL;
 static i2c_bb_state *m_i2c_bb;
 static volatile uint16_t lsm6ds3_addr;
-static int rate_hz = 1000;
+static int rate_hz = LSM6DS3_RATE_HZ_MAX;
 static IMU_FILTER filter;
+static float sma_samples[6][LSM6DS3_SMA_FILTER_LEN];
+static float sma_sum[6];
+static int sma_pos;
+static int sma_sample_num;
 
 static void terminal_read_reg(int argc, const char **argv);
 static uint8_t read_single_reg(uint8_t reg);
+static void reset_sma(void);
+static void filter_sma(float *accel, float *gyro);
 static THD_FUNCTION(lsm6ds3_thread, arg);
 
 // Function pointers
@@ -41,7 +58,7 @@ static void(*read_callback)(float *accel, float *gyro, float *mag) = 0;
 
 
 void lsm6ds3_set_rate_hz(int hz) {
-	rate_hz = hz;
+	(void)hz;
 }
 
 void lsm6ds3_set_filter(IMU_FILTER f) {
@@ -52,6 +69,7 @@ void lsm6ds3_init(i2c_bb_state *i2c_state,
 		stkalign_t *work_area, size_t work_area_size) {
 
 	read_callback = 0;
+	reset_sma();
 
 	m_i2c_bb = i2c_state;
 
@@ -80,52 +98,19 @@ void lsm6ds3_init(i2c_bb_state *i2c_state,
 	// oversampling is achieved by configuring higher bandwidth + stronger filtering
 	#define LSM6DS3TRC_BW0_XL 0x1
 	#define LSM6DS3TRC_LPF1_BW_SEL 0x2
+	rate_hz = is_trc ? LSM6DS3_RATE_HZ_MAX : LSM6DS3_RATE_HZ_MAX_STANDARD_GYRO;
 
 	// Configure imu
-	// Set all accel speeds
+	// Set accel to the maximum available output data rate.
 	txb[0] = LSM6DS3_ACC_GYRO_CTRL1_XL;
-	txb[1] = LSM6DS3_ACC_GYRO_BW_XL_400Hz | LSM6DS3_ACC_GYRO_FS_XL_16g;
-	if (rate_hz <= 13) {
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_13Hz;
-	} else if (rate_hz <= 26){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_26Hz;
-	} else if (rate_hz <= 52){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_52Hz;
-	} else if (rate_hz <= 104){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_104Hz;
-	} else if (rate_hz <= 208){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_208Hz;
-	} else if (rate_hz <= 416){
-		if (is_trc && (filter >= IMU_FILTER_MEDIUM)) {
-			// ODR/4 with 833Hz
-			txb[1] |= LSM6DS3TRC_LPF1_BW_SEL | LSM6DS3_ACC_GYRO_ODR_XL_833Hz;
-		} else {
-			// default: ODR/2 with 416Hz
-			txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_416Hz;
+	txb[1] = LSM6DS3_ACC_GYRO_BW_XL_400Hz |
+			LSM6DS3_ACC_GYRO_FS_XL_16g |
+			LSM6DS3_ACC_GYRO_ODR_XL_6660Hz;
+	if (is_trc && (filter >= IMU_FILTER_MEDIUM)) {
+		txb[1] |= LSM6DS3TRC_LPF1_BW_SEL;
+		if (filter == IMU_FILTER_HIGH) {
+			txb[1] |= LSM6DS3TRC_BW0_XL;
 		}
-	} else if (rate_hz <= 833){
-		if (is_trc && (filter >= IMU_FILTER_MEDIUM)) {
-			// ODR/4 with 1660Hz AND Accelerometer Analog Chain Bandwidth = 400Hz
-			txb[1] |= LSM6DS3TRC_BW0_XL | LSM6DS3TRC_LPF1_BW_SEL | LSM6DS3_ACC_GYRO_ODR_XL_1660Hz;
-		} else {
-			// default: ODR/2 with 833Hz
-			txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_833Hz;
-		}
-	} else if (rate_hz <= 1660){
-		if (is_trc && (filter >= IMU_FILTER_MEDIUM)) {
-			// ODR/4 with 3330Hz
-			txb[1] |= LSM6DS3TRC_LPF1_BW_SEL | LSM6DS3_ACC_GYRO_ODR_XL_3330Hz;
-			if (filter == IMU_FILTER_HIGH) {
-				// Also enable Accelerometer Analog Chain Bandwidth = 400Hz
-				txb[1] |= LSM6DS3TRC_BW0_XL;
-			}
-		} else {
-			txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_1660Hz;
-		}
-	} else if (rate_hz <= 3330){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_3330Hz;
-	} else {
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_XL_6660Hz;
 	}
 	res = i2c_bb_tx_rx(m_i2c_bb, lsm6ds3_addr, txb, 2, rxb, 1);
 	if (!res){
@@ -133,29 +118,13 @@ void lsm6ds3_init(i2c_bb_state *i2c_state,
 		return;
 	}
 
-	// Set all gyro speeds
+	// Set gyro to the maximum available output data rate for this variant.
 	txb[0] = LSM6DS3_ACC_GYRO_CTRL2_G;
 	txb[1] = LSM6DS3_ACC_GYRO_FS_G_2000dps;
-	if (rate_hz <= 13){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_G_13Hz;
-	} else if (rate_hz <= 26){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_G_26Hz;
-	} else if (rate_hz <= 52){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_G_52Hz;
-	} else if (rate_hz <= 104){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_G_104Hz;
-	} else if (rate_hz <= 208){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_G_208Hz;
-	} else if (rate_hz <= 416){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_G_416Hz;
-	} else if (rate_hz <= 833){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_G_833Hz;
-	} else if (rate_hz <= 1660 || is_trc == false){
-		txb[1] |= LSM6DS3_ACC_GYRO_ODR_G_1660Hz;
-	} else if (rate_hz <= 3330){
-		txb[1] |= LSM6DS3TRC_ACC_GYRO_ODR_G_3330Hz;
-	} else {
+	if (is_trc) {
 		txb[1] |= LSM6DS3TRC_ACC_GYRO_ODR_G_6660Hz;
+	} else {
+		txb[1] |= LSM6DS3_ACC_GYRO_ODR_G_1660Hz;
 	}
 	res = i2c_bb_tx_rx(m_i2c_bb, lsm6ds3_addr, txb, 2, rxb, 1);
 	if (!res){
@@ -257,6 +226,49 @@ static void terminal_read_reg(int argc, const char **argv) {
 	}
 }
 
+static void reset_sma(void) {
+	memset(sma_samples, 0, sizeof(sma_samples));
+	memset(sma_sum, 0, sizeof(sma_sum));
+	sma_pos = 0;
+	sma_sample_num = 0;
+}
+
+static void filter_sma(float *accel, float *gyro) {
+#if LSM6DS3_SMA_FILTER_LEN > 1
+	float sample[6] = {
+			gyro[0], gyro[1], gyro[2],
+			accel[0], accel[1], accel[2]
+	};
+	const int sample_num = sma_sample_num < LSM6DS3_SMA_FILTER_LEN ?
+			sma_sample_num + 1 : LSM6DS3_SMA_FILTER_LEN;
+
+	for (int i = 0; i < 6; i++) {
+		sma_sum[i] += sample[i] - sma_samples[i][sma_pos];
+		sma_samples[i][sma_pos] = sample[i];
+		sample[i] = sma_sum[i] / (float)sample_num;
+	}
+
+	sma_pos++;
+	if (sma_pos >= LSM6DS3_SMA_FILTER_LEN) {
+		sma_pos = 0;
+	}
+
+	if (sma_sample_num < LSM6DS3_SMA_FILTER_LEN) {
+		sma_sample_num++;
+	}
+
+	gyro[0] = sample[0];
+	gyro[1] = sample[1];
+	gyro[2] = sample[2];
+	accel[0] = sample[3];
+	accel[1] = sample[4];
+	accel[2] = sample[5];
+#else
+	(void)accel;
+	(void)gyro;
+#endif
+}
+
 static THD_FUNCTION(lsm6ds3_thread, arg) {
 	(void)arg;
 	chRegSetThreadName("LSM6SD3");
@@ -282,6 +294,7 @@ static THD_FUNCTION(lsm6ds3_thread, arg) {
 
 		if (res && read_callback) {
 			float tmp_accel[3] = {ax,ay,az}, tmp_gyro[3] = {gx,gy,gz}, tmp_mag[3] = {1,2,3};
+			filter_sma(tmp_accel, tmp_gyro);
 			read_callback(tmp_accel, tmp_gyro, tmp_mag);
 		}
 
@@ -299,4 +312,3 @@ static THD_FUNCTION(lsm6ds3_thread, arg) {
 		}
 	}
 }
-
