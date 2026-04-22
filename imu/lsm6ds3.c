@@ -24,33 +24,18 @@
 #include "utils_math.h"
 
 #include <stdio.h>
-#include <string.h>
 
 #define LSM6DS3_RATE_HZ_MAX				6660
 #define LSM6DS3_RATE_HZ_MAX_STANDARD_GYRO		1660
-
-#ifndef LSM6DS3_SMA_FILTER_LEN
-#define LSM6DS3_SMA_FILTER_LEN				4
-#endif
-
-#if LSM6DS3_SMA_FILTER_LEN < 1
-#error "LSM6DS3_SMA_FILTER_LEN must be at least 1"
-#endif
 
 static thread_t *lsm6ds3_thread_ref = NULL;
 static i2c_bb_state *m_i2c_bb;
 static volatile uint16_t lsm6ds3_addr;
 static int rate_hz = LSM6DS3_RATE_HZ_MAX;
 static IMU_FILTER filter;
-static float sma_samples[6][LSM6DS3_SMA_FILTER_LEN];
-static float sma_sum[6];
-static int sma_pos;
-static int sma_sample_num;
 
 static void terminal_read_reg(int argc, const char **argv);
 static uint8_t read_single_reg(uint8_t reg);
-static void reset_sma(void);
-static void filter_sma(float *accel, float *gyro);
 static THD_FUNCTION(lsm6ds3_thread, arg);
 
 // Function pointers
@@ -69,7 +54,6 @@ void lsm6ds3_init(i2c_bb_state *i2c_state,
 		stkalign_t *work_area, size_t work_area_size) {
 
 	read_callback = 0;
-	reset_sma();
 
 	m_i2c_bb = i2c_state;
 
@@ -226,49 +210,6 @@ static void terminal_read_reg(int argc, const char **argv) {
 	}
 }
 
-static void reset_sma(void) {
-	memset(sma_samples, 0, sizeof(sma_samples));
-	memset(sma_sum, 0, sizeof(sma_sum));
-	sma_pos = 0;
-	sma_sample_num = 0;
-}
-
-static void filter_sma(float *accel, float *gyro) {
-#if LSM6DS3_SMA_FILTER_LEN > 1
-	float sample[6] = {
-			gyro[0], gyro[1], gyro[2],
-			accel[0], accel[1], accel[2]
-	};
-	const int sample_num = sma_sample_num < LSM6DS3_SMA_FILTER_LEN ?
-			sma_sample_num + 1 : LSM6DS3_SMA_FILTER_LEN;
-
-	for (int i = 0; i < 6; i++) {
-		sma_sum[i] += sample[i] - sma_samples[i][sma_pos];
-		sma_samples[i][sma_pos] = sample[i];
-		sample[i] = sma_sum[i] / (float)sample_num;
-	}
-
-	sma_pos++;
-	if (sma_pos >= LSM6DS3_SMA_FILTER_LEN) {
-		sma_pos = 0;
-	}
-
-	if (sma_sample_num < LSM6DS3_SMA_FILTER_LEN) {
-		sma_sample_num++;
-	}
-
-	gyro[0] = sample[0];
-	gyro[1] = sample[1];
-	gyro[2] = sample[2];
-	accel[0] = sample[3];
-	accel[1] = sample[4];
-	accel[2] = sample[5];
-#else
-	(void)accel;
-	(void)gyro;
-#endif
-}
-
 static THD_FUNCTION(lsm6ds3_thread, arg) {
 	(void)arg;
 	chRegSetThreadName("LSM6SD3");
@@ -294,7 +235,6 @@ static THD_FUNCTION(lsm6ds3_thread, arg) {
 
 		if (res && read_callback) {
 			float tmp_accel[3] = {ax,ay,az}, tmp_gyro[3] = {gx,gy,gz}, tmp_mag[3] = {1,2,3};
-			filter_sma(tmp_accel, tmp_gyro);
 			read_callback(tmp_accel, tmp_gyro, tmp_mag);
 		}
 

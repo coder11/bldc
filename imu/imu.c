@@ -34,6 +34,18 @@
 #include <math.h>
 #include <string.h>
 
+#ifndef IMU_SMA_FILTER_LEN
+#ifdef LSM6DS3_SMA_FILTER_LEN
+#define IMU_SMA_FILTER_LEN		LSM6DS3_SMA_FILTER_LEN
+#else
+#define IMU_SMA_FILTER_LEN		1
+#endif
+#endif
+
+#if IMU_SMA_FILTER_LEN < 1
+#error "IMU_SMA_FILTER_LEN must be at least 1"
+#endif
+
 // Private variables
 static ATTITUDE_INFO m_att;
 static FusionAhrs m_fusionAhrs;
@@ -47,10 +59,16 @@ static imu_config m_settings;
 static systime_t init_time;
 static bool imu_ready;
 static Biquad acc_x_biquad, acc_y_biquad, acc_z_biquad, gyro_x_biquad, gyro_y_biquad, gyro_z_biquad;
+static float sma_samples[6][IMU_SMA_FILTER_LEN];
+static float sma_sum[6];
+static int sma_pos;
+static int sma_sample_num;
 static char *m_imu_type_internal = "Unknown";
 
 // Private functions
 static void imu_read_callback(float *accel, float *gyro, float *mag);
+static void reset_sma(void);
+static void filter_sma(float *accel, float *gyro);
 static int8_t user_i2c_read(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data, uint16_t len);
 static int8_t user_i2c_write(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data, uint16_t len);
 static int8_t user_spi_read(uint8_t dev_id, uint8_t reg_addr, uint8_t *data, uint16_t len);
@@ -88,6 +106,7 @@ void imu_init(imu_config *set) {
 	}
 
 
+	reset_sma();
 	imu_ready = false;
 
 	if (!imu_changed) {
@@ -180,6 +199,7 @@ void imu_reset_orientation(void) {
 	ahrs_init_attitude_info(&m_att);
 	FusionAhrsInitialise(&m_fusionAhrs, 10.0, 1.0);
 	ahrs_update_all_parameters(&m_att, 1.0, 10.0, 0.0, 2.0);
+	reset_sma();
 }
 
 i2c_bb_state *imu_get_i2c(void) {
@@ -495,6 +515,49 @@ void imu_set_read_callback(void (*func)(float *acc, float *gyro, float *mag, flo
 	m_read_callback = func;
 }
 
+static void reset_sma(void) {
+	memset(sma_samples, 0, sizeof(sma_samples));
+	memset(sma_sum, 0, sizeof(sma_sum));
+	sma_pos = 0;
+	sma_sample_num = 0;
+}
+
+static void filter_sma(float *accel, float *gyro) {
+#if IMU_SMA_FILTER_LEN > 1
+	float sample[6] = {
+			gyro[0], gyro[1], gyro[2],
+			accel[0], accel[1], accel[2]
+	};
+	const int sample_num = sma_sample_num < IMU_SMA_FILTER_LEN ?
+			sma_sample_num + 1 : IMU_SMA_FILTER_LEN;
+
+	for (int i = 0; i < 6; i++) {
+		sma_sum[i] += sample[i] - sma_samples[i][sma_pos];
+		sma_samples[i][sma_pos] = sample[i];
+		sample[i] = sma_sum[i] / (float)sample_num;
+	}
+
+	sma_pos++;
+	if (sma_pos >= IMU_SMA_FILTER_LEN) {
+		sma_pos = 0;
+	}
+
+	if (sma_sample_num < IMU_SMA_FILTER_LEN) {
+		sma_sample_num++;
+	}
+
+	gyro[0] = sample[0];
+	gyro[1] = sample[1];
+	gyro[2] = sample[2];
+	accel[0] = sample[3];
+	accel[1] = sample[4];
+	accel[2] = sample[5];
+#else
+	(void)accel;
+	(void)gyro;
+#endif
+}
+
 static void imu_read_callback(float *accel, float *gyro, float *mag) {
 	static uint32_t last_time = 0;
 
@@ -609,6 +672,8 @@ static void imu_read_callback(float *accel, float *gyro, float *mag) {
 		m_gyro[1] = biquad_process(&gyro_y_biquad, m_gyro[1]);
 		m_gyro[2] = biquad_process(&gyro_z_biquad, m_gyro[2]);
 	}
+
+	filter_sma(m_accel, m_gyro);
 
 	float gyro_rad[3];
 	gyro_rad[0] = DEG2RAD_f(m_gyro[0]);
