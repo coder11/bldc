@@ -31,6 +31,10 @@
 #include "pwm_servo.h"
 #include "servo_dec.h"
 
+#if defined(LSM6DS3_SDA_GPIO) || defined(LSM6DS3_NSS_GPIO)
+#define APP_FORCE_INTERNAL_LSM6DS3
+#endif
+
 // Private variables
 static app_configuration appconf = {0};
 static virtual_timer_t output_vt = {0};
@@ -59,6 +63,10 @@ void app_set_configuration(app_configuration *conf) {
 
 	appconf = *conf;
 
+#ifdef APP_FORCE_INTERNAL_LSM6DS3
+	appconf.imu_conf.type = IMU_TYPE_INTERNAL;
+#endif
+
 	if (app_changed) {
 		app_ppm_stop();
 		app_adc_stop();
@@ -79,7 +87,7 @@ void app_set_configuration(app_configuration *conf) {
 	comm_can_set_baud(conf->can_baud_rate, 0);
 #endif
 
-	imu_init(&conf->imu_conf);
+	imu_init(&appconf.imu_conf);
 
 	if (app_changed) {
 		if (appconf.app_to_use != APP_PPM &&
@@ -218,4 +226,3 @@ unsigned short app_calc_crc(app_configuration* conf) {
 	conf->crc = crc_old;
 	return crc_new;
 }
-
