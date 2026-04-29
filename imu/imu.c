@@ -34,16 +34,37 @@
 #include <math.h>
 #include <string.h>
 
-#ifndef IMU_SMA_FILTER_LEN
-#ifdef LSM6DS3_SMA_FILTER_LEN
-#define IMU_SMA_FILTER_LEN		LSM6DS3_SMA_FILTER_LEN
-#else
-#define IMU_SMA_FILTER_LEN		1
-#endif
+#ifndef IMU_FIR_RAW_RATE_HZ
+#define IMU_FIR_RAW_RATE_HZ			6000.0f
 #endif
 
-#if IMU_SMA_FILTER_LEN < 1
-#error "IMU_SMA_FILTER_LEN must be at least 1"
+#ifndef IMU_FIR_DECIMATION
+#define IMU_FIR_DECIMATION			6
+#endif
+
+#ifndef IMU_FIR_OUTPUT_RATE_HZ
+#define IMU_FIR_OUTPUT_RATE_HZ		(IMU_FIR_RAW_RATE_HZ / (float)IMU_FIR_DECIMATION)
+#endif
+
+#ifndef IMU_FIR_TAPS
+#define IMU_FIR_TAPS				16
+#endif
+
+#ifndef IMU_FIR_COEFFS
+#define IMU_FIR_COEFFS { \
+		0.001663382f, 0.005168531f, 0.015527844f, 0.035916326f, \
+		0.065649457f, 0.099572841f, 0.129474008f, 0.147027612f, \
+		0.147027612f, 0.129474008f, 0.099572841f, 0.065649457f, \
+		0.035916326f, 0.015527844f, 0.005168531f, 0.001663382f \
+}
+#endif
+
+#if IMU_FIR_DECIMATION < 1
+#error "IMU_FIR_DECIMATION must be at least 1"
+#endif
+
+#if IMU_FIR_TAPS < 1
+#error "IMU_FIR_TAPS must be at least 1"
 #endif
 
 // Private variables
@@ -59,16 +80,17 @@ static imu_config m_settings;
 static systime_t init_time;
 static bool imu_ready;
 static Biquad acc_x_biquad, acc_y_biquad, acc_z_biquad, gyro_x_biquad, gyro_y_biquad, gyro_z_biquad;
-static float sma_samples[6][IMU_SMA_FILTER_LEN];
-static float sma_sum[6];
-static int sma_pos;
-static int sma_sample_num;
+static const float fir_coeffs[IMU_FIR_TAPS] = IMU_FIR_COEFFS;
+static float fir_samples[6][IMU_FIR_TAPS];
+static float ahrs_update_dt;
+static int fir_pos;
+static int fir_decimation_pos;
 static char *m_imu_type_internal = "Unknown";
 
 // Private functions
 static void imu_read_callback(float *accel, float *gyro, float *mag);
-static void reset_sma(void);
-static void filter_sma(float *accel, float *gyro);
+static void reset_fir_decimator(void);
+static bool filter_fir_decimator(float *accel, float *gyro);
 static int8_t user_i2c_read(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data, uint16_t len);
 static int8_t user_i2c_write(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data, uint16_t len);
 static int8_t user_spi_read(uint8_t dev_id, uint8_t reg_addr, uint8_t *data, uint16_t len);
@@ -106,7 +128,7 @@ void imu_init(imu_config *set) {
 	}
 
 
-	reset_sma();
+	reset_fir_decimator();
 	imu_ready = false;
 
 	if (!imu_changed) {
@@ -199,7 +221,7 @@ void imu_reset_orientation(void) {
 	ahrs_init_attitude_info(&m_att);
 	FusionAhrsInitialise(&m_fusionAhrs, 10.0, 1.0);
 	ahrs_update_all_parameters(&m_att, 1.0, 10.0, 0.0, 2.0);
-	reset_sma();
+	reset_fir_decimator();
 }
 
 i2c_bb_state *imu_get_i2c(void) {
@@ -515,35 +537,38 @@ void imu_set_read_callback(void (*func)(float *acc, float *gyro, float *mag, flo
 	m_read_callback = func;
 }
 
-static void reset_sma(void) {
-	memset(sma_samples, 0, sizeof(sma_samples));
-	memset(sma_sum, 0, sizeof(sma_sum));
-	sma_pos = 0;
-	sma_sample_num = 0;
+static void reset_fir_decimator(void) {
+	memset(fir_samples, 0, sizeof(fir_samples));
+	ahrs_update_dt = 0.0;
+	fir_pos = 0;
+	fir_decimation_pos = 0;
 }
 
-static void filter_sma(float *accel, float *gyro) {
-#if IMU_SMA_FILTER_LEN > 1
+static bool filter_fir_decimator(float *accel, float *gyro) {
 	float sample[6] = {
 			gyro[0], gyro[1], gyro[2],
 			accel[0], accel[1], accel[2]
 	};
-	const int sample_num = sma_sample_num < IMU_SMA_FILTER_LEN ?
-			sma_sample_num + 1 : IMU_SMA_FILTER_LEN;
 
 	for (int i = 0; i < 6; i++) {
-		sma_sum[i] += sample[i] - sma_samples[i][sma_pos];
-		sma_samples[i][sma_pos] = sample[i];
-		sample[i] = sma_sum[i] / (float)sample_num;
+		fir_samples[i][fir_pos] = sample[i];
+		float filtered = 0.0f;
+		int sample_pos = fir_pos;
+
+		for (int j = 0; j < IMU_FIR_TAPS; j++) {
+			filtered += fir_coeffs[j] * fir_samples[i][sample_pos];
+			sample_pos--;
+			if (sample_pos < 0) {
+				sample_pos = IMU_FIR_TAPS - 1;
+			}
+		}
+
+		sample[i] = filtered;
 	}
 
-	sma_pos++;
-	if (sma_pos >= IMU_SMA_FILTER_LEN) {
-		sma_pos = 0;
-	}
-
-	if (sma_sample_num < IMU_SMA_FILTER_LEN) {
-		sma_sample_num++;
+	fir_pos++;
+	if (fir_pos >= IMU_FIR_TAPS) {
+		fir_pos = 0;
 	}
 
 	gyro[0] = sample[0];
@@ -552,10 +577,14 @@ static void filter_sma(float *accel, float *gyro) {
 	accel[0] = sample[3];
 	accel[1] = sample[4];
 	accel[2] = sample[5];
-#else
-	(void)accel;
-	(void)gyro;
-#endif
+
+	fir_decimation_pos++;
+	if (fir_decimation_pos >= IMU_FIR_DECIMATION) {
+		fir_decimation_pos = 0;
+		return true;
+	}
+
+	return false;
 }
 
 static void imu_read_callback(float *accel, float *gyro, float *mag) {
@@ -639,41 +668,55 @@ static void imu_read_callback(float *accel, float *gyro, float *mag) {
 	float m21 = c2 * s1;	float m22 = c1 * c3 + s1 * s2 * s3;	float m23 = c3 * s1 * s2 - c1 * s3;
 	float m31 = -s2; 		float m32 = c2 * s3;				float m33 = c2 * c3;
 
-	m_accel[0] = accel[0] * m11 + accel[1] * m12 + accel[2] * m13;
-	m_accel[1] = accel[0] * m21 + accel[1] * m22 + accel[2] * m23;
-	m_accel[2] = accel[0] * m31 + accel[1] * m32 + accel[2] * m33;
+	float accel_sample[3];
+	float gyro_sample[3];
+	float mag_sample[3];
 
-	m_gyro[0] = gyro[0] * m11 + gyro[1] * m12 + gyro[2] * m13;
-	m_gyro[1] = gyro[0] * m21 + gyro[1] * m22 + gyro[2] * m23;
-	m_gyro[2] = gyro[0] * m31 + gyro[1] * m32 + gyro[2] * m33;
+	accel_sample[0] = accel[0] * m11 + accel[1] * m12 + accel[2] * m13;
+	accel_sample[1] = accel[0] * m21 + accel[1] * m22 + accel[2] * m23;
+	accel_sample[2] = accel[0] * m31 + accel[1] * m32 + accel[2] * m33;
 
-	m_mag[0] = mag[0] * m11 + mag[1] * m12 + mag[2] * m13;
-	m_mag[1] = mag[0] * m21 + mag[1] * m22 + mag[2] * m23;
-	m_mag[2] = mag[0] * m31 + mag[1] * m32 + mag[2] * m33;
+	gyro_sample[0] = gyro[0] * m11 + gyro[1] * m12 + gyro[2] * m13;
+	gyro_sample[1] = gyro[0] * m21 + gyro[1] * m22 + gyro[2] * m23;
+	gyro_sample[2] = gyro[0] * m31 + gyro[1] * m32 + gyro[2] * m33;
+
+	mag_sample[0] = mag[0] * m11 + mag[1] * m12 + mag[2] * m13;
+	mag_sample[1] = mag[0] * m21 + mag[1] * m22 + mag[2] * m23;
+	mag_sample[2] = mag[0] * m31 + mag[1] * m32 + mag[2] * m33;
 
 	// Accelerometer and Gyro offset compensation and estimation
 	for (int i = 0; i < 3; i++) {
-		m_accel[i] -= m_settings.accel_offsets[i];
-		m_gyro[i] -= m_settings.gyro_offsets[i];
+		accel_sample[i] -= m_settings.accel_offsets[i];
+		gyro_sample[i] -= m_settings.gyro_offsets[i];
 	}
 
-	// Apply filters
+	ahrs_update_dt += dt;
+	if (!filter_fir_decimator(accel_sample, gyro_sample)) {
+		return;
+	}
+
+	// Apply configured filters in the decimated output domain.
 	if(m_settings.accel_lowpass_filter_x > 0){
-		m_accel[0] = biquad_process(&acc_x_biquad, m_accel[0]);
+		accel_sample[0] = biquad_process(&acc_x_biquad, accel_sample[0]);
 	}
 	if(m_settings.accel_lowpass_filter_y > 0){
-		m_accel[1] = biquad_process(&acc_y_biquad, m_accel[1]);
+		accel_sample[1] = biquad_process(&acc_y_biquad, accel_sample[1]);
 	}
 	if(m_settings.accel_lowpass_filter_z > 0){
-		m_accel[2] = biquad_process(&acc_z_biquad, m_accel[2]);
+		accel_sample[2] = biquad_process(&acc_z_biquad, accel_sample[2]);
 	}
 	if(m_settings.gyro_lowpass_filter > 0){
-		m_gyro[0] = biquad_process(&gyro_x_biquad, m_gyro[0]);
-		m_gyro[1] = biquad_process(&gyro_y_biquad, m_gyro[1]);
-		m_gyro[2] = biquad_process(&gyro_z_biquad, m_gyro[2]);
+		gyro_sample[0] = biquad_process(&gyro_x_biquad, gyro_sample[0]);
+		gyro_sample[1] = biquad_process(&gyro_y_biquad, gyro_sample[1]);
+		gyro_sample[2] = biquad_process(&gyro_z_biquad, gyro_sample[2]);
 	}
 
-	filter_sma(m_accel, m_gyro);
+	const float update_dt = ahrs_update_dt;
+	ahrs_update_dt = 0.0;
+
+	memcpy(m_accel, accel_sample, sizeof(m_accel));
+	memcpy(m_gyro, gyro_sample, sizeof(m_gyro));
+	memcpy(m_mag, mag_sample, sizeof(m_mag));
 
 	float gyro_rad[3];
 	gyro_rad[0] = DEG2RAD_f(m_gyro[0]);
@@ -682,10 +725,10 @@ static void imu_read_callback(float *accel, float *gyro, float *mag) {
 
 	switch (m_settings.mode) {
 		case AHRS_MODE_MADGWICK:
-			ahrs_update_madgwick_imu(gyro_rad, m_accel, dt, (ATTITUDE_INFO *)&m_att);
+			ahrs_update_madgwick_imu(gyro_rad, m_accel, update_dt, (ATTITUDE_INFO *)&m_att);
 			break;
 		case AHRS_MODE_MAHONY:
-			ahrs_update_mahony_imu(gyro_rad, m_accel, dt, (ATTITUDE_INFO *)&m_att);
+			ahrs_update_mahony_imu(gyro_rad, m_accel, update_dt, (ATTITUDE_INFO *)&m_att);
 			break;
 		case AHRS_MODE_MADGWICK_FUSION: {
 			FusionVector3 calibratedGyroscope = {
@@ -698,7 +741,7 @@ static void imu_read_callback(float *accel, float *gyro, float *mag) {
 					.axis.y = m_accel[1],
 					.axis.z = m_accel[2],
 			};
-			FusionAhrsUpdateWithoutMagnetometer(&m_fusionAhrs, calibratedGyroscope, calibratedAccelerometer, dt);
+			FusionAhrsUpdateWithoutMagnetometer(&m_fusionAhrs, calibratedGyroscope, calibratedAccelerometer, update_dt);
 			m_att.q0 = m_fusionAhrs.quaternion.element.w;
 			m_att.q1 = m_fusionAhrs.quaternion.element.x;
 			m_att.q2 = m_fusionAhrs.quaternion.element.y;
@@ -707,7 +750,7 @@ static void imu_read_callback(float *accel, float *gyro, float *mag) {
 	}
 
 	if (m_read_callback) {
-		m_read_callback(m_accel, gyro_rad, m_mag, dt);
+		m_read_callback(m_accel, gyro_rad, m_mag, update_dt);
 	}
 }
 
